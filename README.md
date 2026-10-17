@@ -10,6 +10,7 @@ Execution flow, function call sequence and file dependencies: see [Docs/flow.md]
 - **Admins** log in with the account from `.env` and get a queue of all tickets. They run or re-run the multi-agent workflow (with a demo invoice) and see every result tab. They can reject hard-blocked tickets, but they **cannot approve**.
 - **Approvers** (server-configured via `APPROVER_ACCOUNTS`) decide approval requests on the **Approvals** page: approve, reject or request changes, with a confirmation step. Nobody can approve their own request.
 - **Policy library (RAG):** admins upload multiple policy, vendor and rate-card PDFs. Each ticket run retrieves cited evidence (file, page, section), checks quotes against verified rate cards with Decimal arithmetic, and adds review reasons to the approval request. Approvers verify extracted rate rows. The 3 PDFs in `data/policies` are ingested automatically on first start.
+- **Dynamic policy engine (Phase 3):** business rules are reviewed, versioned data rather than code. Admins extract candidate rules from ready PDFs (LLM with deterministic fallback, cited evidence, prompt-injection flags). Approvers validate and approve or reject them; nothing activates automatically. Every ticket run evaluates the active policy-set version deterministically, and approvals are bound to that version, so a policy change makes them stale.
 - Every draft PO needs an approver's sign-off. Approval records an internal authorization only: the PO stays a draft, and no order or payment is executed.
 
 ## Run
@@ -37,6 +38,7 @@ Stop-Process -Id <PID>
 - `MONGODB_URI` (default `mongodb://localhost:27017/`), `MONGODB_DATABASE` (default `workplaceops`).
 - `ADMIN_USERNAME`, `ADMIN_PASSWORD`: the admin account is created or updated at API startup. If unset there is no admin; there is no default password.
 - `POLICY_RAG_ENABLED` (default on), `POLICY_RAG_SEED` (default on), `POLICY_STORE_DIR` (default `data/policy_store`, git-ignored). Thresholds live in `data/policy_rag_config.json`. Embeddings use the OpenAI key (`text-embedding-3-small`); offline, the system falls back to local vectors.
+- `POLICY_RULES_ENABLED` (default on): evaluate the active rule set on each run. `POLICY_RULES_BOOTSTRAP` (default on): load `data/policy_rules_seed.json` at startup.
 - `APPROVER_ACCOUNTS`: approver accounts as `user:password[,user2:password2]`, created at API startup. Demo auth only; approvers can't self-register, and an existing user or admin is never escalated.
 - `SESSION_TTL_HOURS` (default 8): login session lifetime. Optional: `ADMIN_NAME`, `ADMIN_EMAIL`.
 - `WORKPLACEOPS_PERSISTENCE`: `required` (default; DB write failures return 503) or `disabled` (no database).
@@ -63,6 +65,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 - `app/auth/`: password hashing, sessions, `current_user` / `require_admin`.
 - `app/services/`: ticket service (submit, run, decide, notes, resubmit; persistence).
 - `app/policy_rag/`: PDF ingestion, chunking, embeddings, hybrid retrieval, rate cards and policy evaluation. Routes: `app/routers/policy_documents.py`, `app/routers/policy_search.py`.
+- `app/policy_rules/`: rule schema and restricted language, fact registry, evaluator, registry (lifecycle and active policy set), extraction and engine. Routes: `app/routers/policy_rules.py`.
 - `app/approvals/`: Phase 2 approval policy (deterministic), versioned approval requests and decisions. `app/routers/approvals.py` holds `/api/approvals*`.
 - `app/repositories/`, `app/db/`: the MongoDB data-access layer and shared client.
 - `ui/app.py`: Streamlit entry point (login, User portal, Admin console in `ui/pages_portal/`). `ui/streamlit_app.py` is a shim that runs it.

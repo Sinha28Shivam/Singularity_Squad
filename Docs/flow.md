@@ -10,6 +10,7 @@ This document covers:
 - The role-based portal: users submit tickets and the admin runs the workflow (section 10).
 - Phase 2 approval safety: approvers decide versioned approval requests, with separation of duties (section 11).
 - Phase 2 policy RAG: a multi-PDF policy library, cited evidence, rate cards and evidence snapshots that feed approvals (section 12).
+- Phase 3 dynamic policy engine: reviewed, versioned rules (data, not code) evaluated deterministically on every ticket run (section 13).
 
 All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or payment. Saving a draft PO to the database does **not** approve or issue it.
 
@@ -1098,3 +1099,192 @@ The user portal shows the redacted "Policy check" only.
   - **Mixed upload batch:** privacy_policy.pdf ok (`needs_review`, 1 of 2 pages low-text), broken.pdf → `corrupt`, notes.txt → `not_pdf`, and the real Vander Policy → `duplicate_of`. A reversed date range and a smuggled `uploaded_by` both gave `422`.
   - **After an API restart:** still 3 documents (no re-seed), the ticket and approval `approved`, the snapshot hash unchanged, the verified rate row kept, and every PO `draft`.
 - **Real Streamlit pages against the live API:** the Policy library showed the Upload / Inventory / Search / Rate cards tabs with the real documents, and search returned 8 citations with file, version, page, section and excerpt. The admin ticket detail showed the evidence panel with the rule set version, and there were no exceptions.
+
+---
+
+## 13. Phase 3: dynamic policy engine (spec `Docs/PHASE_3_DYNAMIC_POLICY_ENGINE_IMPLEMENTATION.md`, plus the fixes from `Docs/PHASE_2_COMPLETE_IMPLEMENTATION_AND_FIXES.md`)
+
+**Rules are data, not code.** Business requirements live in typed, versioned rule documents. A small deterministic interpreter evaluates them over a read-only fact registry. Generic software controls stay in code: operators, `Decimal` arithmetic, authorization, lifecycle, audit and draft-only safety.
+
+### 13.1 Modules
+
+```text
+app/policy_rules/
+  schemas.py     PolicyRule (rule_id + immutable rule_version), Condition/AllOf/AnyOf/NotOf (restricted language),
+                 RuleOutcome, EvidenceRef, RuleResult, CoverageItem, PolicySetVersion, RuleEngineEvaluation
+  facts.py       FACT_TYPES registry (26 typed facts: request.*, vendor.*, po.*, workflow.*, rate.*, policy.*),
+                 build_facts(ticket, workflow_result, rate_validations, retrieval_info) -> FactSnapshot (hash)
+  evaluator.py   validate_rule, evaluate_rule (three-valued: missing facts), aggregate, canonical hashes,
+                 describe_expression (readable text), load_seed_bundle
+  registry.py    lifecycle (candidate -> validated -> approved/rejected; superseded), active policy-set pointer (CAS),
+                 conflicts, separation of duties, bootstrap_from_seed, active_rules(as_of)
+  extraction.py  extract_rules(document_id): LLM (schema-constrained, document text as quoted DATA) with
+                 evidence validation, deterministic pattern-v1 fallback, prompt-injection flags, duplicate linking
+  engine.py      evaluate_ticket_rules(...) on the active set -> RuleEngineEvaluation (engine_hash)
+app/repositories/policy_rule_repository.py   policy_rules, policy_sets, policy_set_pointer, policy_rule_events
+app/routers/policy_rules.py                  /api/policy-rules..., /api/policy-documents/{id}/extract-rules, /api/policy-set/active
+data/policy_rules_seed.json                  legacy-config-v1 bundle: 6 rules reproducing the Phase 2 checks as data
+ui/lib/rule_render.py                        readable conditions, rule detail, rule-engine evidence section
+```
+
+### 13.2 Restricted rule language
+
+- **Leaf:** `{"field", "op", "value", "value_type", "currency"?, "unit"?}`.
+- **Combinators:** `{"all": [...]}`, `{"any": [...]}`, `{"not": {...}}`.
+- **Operators:** `eq ne gt gte lt lte in not_in exists is_missing contains_any between date_before date_after date_between`.
+- **Value types:** string, integer, decimal, boolean, date, money (currency required), string_list.
+- **Validation:**
+  - Pydantic `extra="forbid"`, so unknown operators and smuggled keys are rejected.
+  - Field paths must match the regex and exist in the fact registry; there is no attribute or environment access.
+  - Types must be compatible, and money currency must match.
+  - Maximum depth is 6 and maximum node count is 64, with bounded lists and strings. There is no regex.
+- **Evaluation:**
+  - **Scope:** if `applies_when` is false, the rule is `not_applicable`.
+  - **Missing fact:** `review_required` if the rule is `mandatory`, otherwise `not_applicable` with `missing_fields`.
+  - **Match:** the outcome decision sets the status: blocked gives `fail`, review or clarification gives `review_required`, and pass gives `pass`.
+  - **Errors:** any error gives `evaluation_error`, never a pass.
+  - **Arithmetic:** money uses `Decimal`; effective dates use a UTC date convention.
+- **Aggregation:** blocked > needs_clarification > review_required > pass, with every block, review, clarification and error reference kept. Missing coverage or an evaluation error is at least `review_required`.
+
+### 13.3 Rule lifecycle and active policy set
+
+```mermaid
+stateDiagram-v2
+    [*] --> candidate: extract-rules (system:extractor) / manual POST (reviewer) / seed (system:bootstrap)
+    candidate --> validated: POST validate (no schema errors, no conflicts)
+    candidate --> needs_review: validation errors / ambiguous
+    needs_review --> validated: fixed + validated
+    validated --> approved: POST approve (reviewer, not the creator) -> new policy set vN+1 (CAS pointer)
+    candidate --> rejected: POST reject (comment required)
+    validated --> rejected
+    approved --> superseded: newer approved version of same rule_id
+    approved --> rejected: reject approved -> new policy set without it
+    approved --> expired: effective_until passed (not in active_rules)
+```
+
+- **Who reviews:** approvers and admins. Requesters get `403`.
+- **Separation of duties:**
+  - The creator of a manual candidate can't approve it (`403`).
+  - `system:extractor` can never approve.
+  - `system:bootstrap` may approve only `legacy_config` seed rules, and only when `POLICY_RULES_BOOTSTRAP=1`.
+- **Approval steps:** approving re-validates, checks conflicts (`409` with details), and creates an immutable approved version. It then supersedes the previous approved version, builds `PolicySetVersion` vN+1 (rule refs and canonical hashes) and moves the `policy_set_pointer` by compare-and-set (`expected_policy_set_version` mismatch → `409`).
+- **Audit must succeed:** an audit failure is compensated and reported as `503`.
+- **Repeats and races:** approving the same approved version again gives `replayed: true`. Concurrent activations get exactly one winner per CAS step; this is tested on mongomock and real MongoDB.
+- **Evidence references** must point to real chunks of a ready document, matching chunk id, page and hash. Only `legacy_config` seed rules may have none.
+- **Conflicts** include: the same rule_id with overlapping windows, contradictory decisions on identical conditions, currency mismatch, and dangling `supersedes`.
+
+### 13.4 Extracting rules from PDFs
+
+- **Only `ready` documents.** `needs_ocr`, `needs_review`, superseded and archived documents get `409` ("not authoritative"). No OCR engine is installed, so image-only PDFs can never supply rules.
+- **LLM path:**
+  - The system prompt holds the instructions, and chunks are passed as quoted JSON data with their evidence ids.
+  - Output is validated server-side: fabricated evidence ids, or excerpts not found in the cited chunk, are dropped, and candidates without valid evidence are dropped.
+  - Common shape slips are normalized without inventing values. For example, `{"request.attendees": {"op": "gt", ...}}` becomes a leaf, and a missing severity is derived from the typed decision by a fixed mapping.
+  - Anything still invalid is dropped with a warning.
+- **Fallback:** if the LLM returns nothing usable, the deterministic `pattern-v1` extractor runs. It is generic, covering headcount and money thresholds near obligation words, with confidence ≤ 0.6.
+- **Prompt injection:** instruction-like text ("ignore previous instructions", "approve all requests") is flagged as `suspicious_instruction` and never changes anything.
+- **Duplicates** (by semantic hash) are linked rather than recreated.
+- **Every candidate needs human review.** Nothing activates automatically.
+
+### 13.5 Ticket run integration (and Phase 2 fixes)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant TS as ticket_service.run_ticket
+    participant RC as rate_cards
+    participant EV as policy_rag.evaluation
+    participant EN as policy_rules.engine
+    participant RG as registry (active set)
+    participant AP as approvals.policy/service
+
+    TS->>RC: build quotes from THIS run's PO lines (only vendors with rate cards, never guessed)
+    RC-->>TS: validations (catering cat-* -> rate.applicable=false, not_applicable)
+    TS->>EV: evaluate_ticket(..., rate_quotes)
+    EV->>EN: evaluate_ticket_rules(ticket, wr, rate validations, retrieval info, as_of=event date)
+    EN->>RG: active_rules(as_of) + active_version() (re-checked after evaluation)
+    EN-->>EV: RuleEngineEvaluation (results, coverage, overall, reason codes, engine_hash)
+    EV-->>TS: PolicyEvaluationResult + rule_engine (snapshot persisted, append-only)
+    TS->>AP: evaluate_approval_requirement(..., policy_evaluation) - monotonic merge
+    AP-->>TS: requirement (blocks/reviews/clarifications all retained)
+    TS->>AP: approval vN, review_snapshot binds policy_set_version + engine_hash + rule refs
+```
+
+**Rules for the run:**
+
+- **Fail closed:** any engine, registry or snapshot error takes the existing `503` path, and no approval request is created.
+- **Clarification no longer hides a block (Phase 2 §8 fix):** `_apply_policy_evaluation` no longer returns early. A ticket can be `needs_info` and `blocked` at the same time; every code is kept, no approval request is created when blocked, and `policy_status` in the ticket views shows both.
+- **Rate validation runs on normal runs (Phase 2 §7.3 fix).** Results feed the facts `rate.applicable`, `rate.any_fail` and `rate.any_unverified`, and the seed rules RATE-CARD-MISMATCH (mandatory) and RATE-CARD-UNVERIFIED act on them.
+- **Accurate retrieval mode (Phase 2 §6.2 fix):** `hybrid` only with semantic OpenAI embeddings; `hybrid_local_hash` with local hashed vectors (not semantic); `keyword_only_degraded` with none. Results include `embedding_provider`, `embedding_model`, `embedding_available`, `degradation_reason` and `retrieval_config_version`. Any non-hybrid mode adds `POLICY_RETRIEVAL_DEGRADED` and can't produce a `pass` outcome.
+- **Stale policy set:** a decision on a pending approval bound to a policy-set version that is no longer active gets `409` "Policy set changed since this request was evaluated; re-run the ticket." The view shows `stale_policy: true`. Re-running creates a new snapshot and approval version; old snapshots are never rewritten.
+
+### 13.6 Phase 3 API
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| GET | `/api/policy-rules?status=&rule_id=` | approver, admin | `{rules, counts}` |
+| GET | `/api/policy-rules/{rule_id}/versions/{version}` | approver, admin | one immutable version |
+| POST | `/api/policy-rules` | approver, admin | manual candidate (`PolicyRuleIn`, evidence required, `extra=forbid`) |
+| POST | `/api/policy-rules/{rule_id}/validate` | approver, admin | `{rule, errors, conflicts}` |
+| POST | `/api/policy-rules/{rule_id}/approve` | approver, admin (not the creator) | `{rule, policy_set_version, replayed}`; `409` on conflict, stale `expected_policy_set_version`, or CAS loss; `503` on audit failure |
+| POST | `/api/policy-rules/{rule_id}/reject` | approver, admin | comment required (`422` otherwise) |
+| POST | `/api/policy-documents/{document_id}/extract-rules` | admin | `{candidates, duplicates, warnings, extraction_model}`; `409` for non-ready documents |
+| GET | `/api/policy-set/active` | approver, admin | the active `PolicySetVersion` (version, rule refs and hashes, creator, previous version) |
+| GET | `/api/requests/{ticket_id}/evidence` | as before | now also includes `rule_engine` and `stale_policy`. The requester gets a redacted engine view: overall status plus each rule's status and explanation, with no hashes or facts. |
+
+**Collections and indexes:**
+
+- `policy_rules`: `rule_version_unique`, `rule_status`, `rule_semantic_hash`
+- `policy_sets`: `policy_set_version_unique`
+- `policy_set_pointer`: a single document (`_id: "active"`)
+- `policy_rule_events`: `rule_event_time`, `rule_event_rule`
+
+Evidence snapshots now carry `rule_engine`. Every run also records a `rule_engine_evaluated` event in `policy_events`.
+
+### 13.7 UI
+
+- **Rules tab (Policy library, approvers and admins):**
+  - A candidate queue with status filter and counts, and an active policy-set banner showing what changed since the last version.
+  - **Rule detail:** the readable condition (e.g. `request.attendees > 80`) plus raw JSON; the outcome, severity and whether it is mandatory; evidence excerpts with file, page and section ("page unavailable" when unknown); confidence and model; warnings (`suspicious_instruction` shown in red); validation errors, conflicts and effective dates.
+  - **Actions:** Validate, Approve and Reject need a confirmation tick (Reject also needs a comment) and send `rule_version` plus `expected_policy_set_version`.
+- **Extract rules:** a button for each ready document in the Inventory (admin only).
+- **Evidence panels:** a Rule engine section showing the overall badge, a per-rule table, coverage, policy-set and evaluator versions, and the engine hash. Approvals also show the `stale_policy` warning. The retrieval badge reads "Semantic hybrid", "Local hashed vectors (not semantic)" or "Keyword only (degraded)".
+
+### 13.8 What changed for existing behaviour
+
+1. **Every portal run is evaluated against the active policy set** (`POLICY_RULES_ENABLED`, default on).
+   - On first start, `POLICY_RULES_BOOTSTRAP=1` loads the 6 legacy seed rules, so behaviour matches Phase 2.
+   - Reason codes such as `VENDOR_VERIFICATION_REQUIRED` and `SAFETY_REVIEW_REQUIRED` now appear on approval requests.
+2. **Offline retrieval is labelled honestly.** It now reads `hybrid_local_hash` instead of `hybrid`, adding `POLICY_RETRIEVAL_DEGRADED`, so the outcome is `review_required`.
+3. **A clarification no longer hides policy reason codes or blocks.**
+4. **Pending approvals go stale** when a new policy set is activated. Deciding them gives `409`; re-run the ticket.
+5. **Event-vendor (`evt-*`) PO lines** come back `unknown`, with `missing_fields=["unit"]`, until procurement records a unit (`LineItem.unit` is a new Optional field). Catering is unaffected: it is `not_applicable`.
+6. **Tests:** conftest defaults to `POLICY_RULES_ENABLED=0` and `POLICY_RULES_BOOTSTRAP=0`; Phase 3 tests opt in.
+7. **Unchanged:** the agents, costing, auth, approval-safety guarantees, and draft-only POs.
+
+### 13.9 Phase 3 verification record (2026-10-17)
+
+- `python -m pytest -q`: **565 passed** (350 earlier + 215 new). The new tests cover:
+  - **Unit:** evaluator and facts (93), registry, extraction, API and concurrency (65, including real-MongoDB CAS races).
+  - **Integration:** workflow, rate, clarification-plus-block and retrieval-degradation tests.
+  - **UI:** 23 rules UI tests.
+  - **Acceptance:** 2 real-MongoDB and uvicorn tests (spec §20 and the legacy bootstrap).
+- **Live run** (LLM on, OpenAI embeddings, throwaway database):
+  - **Bootstrap:** produced active set v6 with the 6 seed rules.
+  - **Upload and extraction:**
+    - A synthetic 2-page PDF with a low-text page came back `needs_review`, and extraction gave `409` (not authoritative).
+    - A full PDF came back `ready`. Extraction used `gpt-4o-mini`, flagged the injection line as `suspicious_instruction`, and produced candidate RISK_ASSESSMENT_REQUIRED (`request.attendees > 80`, evidence page 2).
+    - The earlier `pattern-v1` candidate for the same clause was rejected, and rejecting it without a comment gave `422`.
+    - Two bugs found here were fixed: LLM shape slips caused every LLM candidate to be dropped, and the `rule_engine_evaluated` event was not registered.
+  - **Review and approval:** requester `403`; stale `expected_policy_set_version` `409`; approval moved the set v6 → v7; replay worked.
+  - **Ticket run (100 attendees):**
+    - Engine `review_required` on set v7, citing RULE-X…@1 page 2; RULE-VENDOR-VERIFICATION was `review_required`, and the rate rules were `not_applicable` (catering).
+    - Retrieval `hybrid` / openai / text-embedding-3-small.
+    - The approval request carried PO_REQUIRES_HUMAN_APPROVAL, AMOUNT_THRESHOLD, POLICY_REVIEW_REQUIRED, RISK_ASSESSMENT_REQUIRED and VENDOR_VERIFICATION_REQUIRED, bound to `policy_set_version` 7 with the engine hash and rule refs.
+    - Approval → `approved`, PO `draft`. The requester saw only `{overall, results}`, with no hashes.
+  - **After an API restart:** rules, the active set, ticket and approvals were intact.
+  - **Second rule and stale decision:**
+    - A manual rule BUDGET_SANITY_REVIEW (`po.total > ₹70,000`, with real evidence) got `403` when its creator tried to approve it; the approver approved it, giving set v8.
+    - The pending decision bound to v7 got `409` "Policy set changed…" with `stale_policy: true`.
+    - A re-run gave approval v2 on set v8 with the new code, and the run-1 snapshot was byte-identical. The fresh decision gave `200`.
+  - **Audit and PO state:** every PO is `draft`, and the rule events include candidate_created, validated, approved, rejected, duplicate_linked, policy_set_activated and bootstrap_completed, plus 3 `rule_engine_evaluated` events.
