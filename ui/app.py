@@ -16,11 +16,11 @@ if str(_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from ui.lib.api import API_BASE, api_post, clear_session, current_user, fetch_health, fetch_invoices  # noqa: E402
-from ui.pages_portal import admin_console, login, user_portal  # noqa: E402
+from ui.pages_portal import admin_console, approvals, login, user_portal  # noqa: E402
 
 DISCLAIMER = (
     "**Prototype on synthetic data · Draft-only.** Purchase orders stay drafts, nothing is purchased "
-    "and no payment is executed. Final approvals stay with humans."
+    "and no payment is executed. Approvals record internal authorization by an eligible human approver only."
 )
 
 
@@ -75,7 +75,12 @@ def main() -> None:
     if not user:
         pages = [st.Page(login.render, title="Log in", icon="🔐", url_path="login", default=True)]
     elif user.get("role") == "admin":
-        pages = [st.Page(admin_console.render, title="Admin console", icon="🛠️", url_path="admin", default=True)]
+        pages = [
+            st.Page(admin_console.render, title="Admin console", icon="🛠️", url_path="admin", default=True),
+            st.Page(approvals.render, title="Approvals (read-only)", icon="🛡️", url_path="approvals"),
+        ]
+    elif user.get("role") == "approver":
+        pages = [st.Page(approvals.render, title="Approvals", icon="🛡️", url_path="approvals", default=True)]
     else:
         pages = [st.Page(user_portal.render, title="My requests", icon="📋", url_path="my-requests", default=True)]
     st.navigation(pages).run()

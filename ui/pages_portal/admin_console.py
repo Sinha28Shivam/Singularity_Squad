@@ -8,14 +8,15 @@ from urllib.parse import quote
 import streamlit as st
 
 from ui.lib.api import (
-    EVENT_CATEGORY_LABELS, TICKET_STATUSES, api_get, api_post, badge, friendly_error,
+    EVENT_CATEGORY_LABELS, PO_DRAFT_LABEL, TICKET_STATUSES, api_get, api_post, badge, friendly_error,
 )
+from ui.lib.approval_render import APPROVAL_TICKET_STATUSES, render_ticket_approval_panel, ticket_approval
 from ui.lib.render import (
     INVOICE_LABELS, format_inr, invoice_options, render_final_status, render_pipeline, render_result_tabs,
 )
 
 DEFAULT_TODAY = date(2026, 10, 17)
-NOT_RUNNABLE = {"approved", "rejected", "processing"}
+NOT_RUNNABLE = {"approved", "rejected", "processing", "changes_requested"}
 
 
 def _tpath(ticket_id: str) -> str:
@@ -100,7 +101,8 @@ def queue_section() -> None:
         return
     data = data if isinstance(data, dict) else {}
     counts = data.get("counts") or {}
-    shown = ["submitted", "processing", "reviewed", "needs_info", "approved", "rejected"]
+    shown = ["submitted", "processing", "reviewed", "needs_info", "pending_approval", "changes_requested",
+             "approval_expired", "approved", "rejected"]
     cols = st.columns(len(shown) + 1)
     for col, s in zip(cols, shown):
         col.metric(badge(s), int(counts.get(s, 0) or 0))
@@ -193,8 +195,6 @@ def actions_section(view: dict, result: Optional[dict]) -> None:
     tid = view["ticket_id"]
     status = view.get("status")
     run_count = int(view.get("run_count") or 0)
-    final = (result or {}).get("final_status")
-    has_po = bool(((result or {}).get("procurement") or {}).get("po"))
 
     st.subheader("Actions")
     a1, a2 = st.columns(2)
@@ -222,23 +222,23 @@ def actions_section(view: dict, result: Optional[dict]) -> None:
 
     with a2, st.container(border=True):
         st.markdown("**🧑‍⚖️ Decision**")
-        can_approve = status == "reviewed" and has_po and final in ("pass", "warning")
-        can_reject = status == "reviewed"
+        st.caption("Approvals are decided by an eligible approver on the Approvals page — admins cannot approve.")
         if status in ("approved", "rejected"):
             d = view.get("decision") or {}
-            st.info(f"Final decision: **{status}** by {d.get('by', '?')} at {d.get('at', '?')}"
-                    + (f" — “{d['note']}”" if d.get("note") else ""))
-        decision_note = st.text_area("Decision note (optional)", key="admin_decision_note", max_chars=2000)
-        b1, b2 = st.columns(2)
-        approve_help = None if can_approve else (
-            "Approval needs status 'reviewed', a draft PO and a pass/warning result.")
-        if b1.button("✅ Approve draft", disabled=not can_approve, key="admin_approve_btn", help=approve_help,
-                     width="stretch"):
-            _decide(tid, "approve", decision_note)
-        if b2.button("❌ Reject", disabled=not can_reject, key="admin_reject_btn", width="stretch",
-                     help=None if can_reject else "Only reviewed tickets can be rejected."):
-            _decide(tid, "reject", decision_note)
-        st.caption("Approval only marks the draft PO approved — nothing is purchased or paid.")
+            if d:
+                st.info(f"Final decision: **{status}** by {d.get('by', '?')} at {d.get('at', '?')}"
+                        + (f" — “{d['note']}”" if d.get("note") else ""))
+            else:
+                st.info(f"Final status: **{status}** (see the approval history below).")
+        elif status == "pending_approval":
+            st.info("⏳🛡️ Waiting for an eligible approver. Re-running the workflow supersedes the pending request.")
+        if status == "reviewed":
+            # Admins may only close tickets that need no approval (e.g. hard-blocked / no draft PO).
+            st.caption("This ticket needs no approval request (blocked or no draft PO). You can close it.")
+            decision_note = st.text_area("Rejection note (optional)", key="admin_decision_note", max_chars=2000)
+            if st.button("❌ Reject", key="admin_reject_btn", width="stretch"):
+                _decide(tid, "reject", decision_note)
+        st.caption(f"Draft PO: {PO_DRAFT_LABEL}.")
 
 
 def _decide(tid: str, decision: str, note: str) -> None:
@@ -247,10 +247,38 @@ def _decide(tid: str, decision: str, note: str) -> None:
         if isinstance(data, dict):
             data.setdefault("ticket_id", tid)
             _set_ticket(data)
-        _flash("success", f"Ticket {tid} {'approved' if decision == 'approve' else 'rejected'}.")
+        _flash("success", f"Ticket {tid} rejected.")
     except Exception as exc:
         _flash("error", friendly_error(exc, ticket=True))
     st.rerun()
+
+
+def approval_section(view: dict) -> None:
+    tav, err = ticket_approval(view)
+    if err:
+        st.subheader("🛡️ Approval")
+        st.warning(f"Approval details unavailable: {err}")
+        return
+    if tav is None and view.get("status") not in APPROVAL_TICKET_STATUSES:
+        return
+    current = render_ticket_approval_panel(tav, show_reconcile_hint=True)
+    if current and current.get("reconciliation_required") and current.get("approval_id"):
+        if st.button("🧩 Reconcile", key="admin_reconcile_btn",
+                     help="Re-apply the follow-up updates for the recorded decision (idempotent)."):
+            aid = current["approval_id"]
+            try:
+                api_post(f"/api/admin/approvals/{quote(aid, safe='')}/reconcile", None, timeout=30)
+                _flash("success", f"Reconciliation finished for {aid} — reloaded from the server.")
+            except Exception as exc:
+                _flash("error", friendly_error(exc))
+            load_ticket_quiet(view["ticket_id"])
+            st.rerun()
+
+
+def load_ticket_quiet(ticket_id: str) -> None:
+    msg = st.session_state.get("admin_flash")
+    if load_ticket(ticket_id) and msg is not None:
+        st.session_state["admin_flash"] = msg
 
 
 def notes_section(view: dict) -> None:
@@ -260,7 +288,7 @@ def notes_section(view: dict) -> None:
     if not notes:
         st.caption("No notes yet.")
     for n in notes:
-        who = "🛠️ Admin" if n.get("role") == "admin" else "🙋 Requester"
+        who = {"admin": "🛠️ Admin", "approver": "🛡️ Approver"}.get(n.get("role"), "🙋 Requester")
         st.markdown(f"**{who} · {n.get('author', '?')}** · {n.get('created_at', '')}\n\n{n.get('text', '')}")
     with st.form(f"admin_note_form_{tid}", clear_on_submit=True):
         text = st.text_area("Add a note (visible to the requester)", key=f"admin_note_{tid}", max_chars=2000)
@@ -288,6 +316,7 @@ def detail_section(view: dict) -> None:
     render_banner(view, result)
     render_requester(view)
     actions_section(view, result)
+    approval_section(view)
     notes_section(view)
 
     st.divider()
@@ -314,7 +343,8 @@ def detail_section(view: dict) -> None:
 
 def render() -> None:
     st.title("🛠️ Admin console")
-    st.caption("Review requests, run the agent workflow, and approve or reject draft purchase orders.")
+    st.caption("Review requests and run the agent workflow. Draft POs that need sign-off go to an eligible "
+               "approver; admins can close (reject) tickets that need no approval.")
     queue_section()
     msg = st.session_state.pop("admin_flash", None)
     if msg:

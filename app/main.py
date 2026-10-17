@@ -14,12 +14,14 @@ from app import llm
 from app.agents import billing, policy
 from app.auth.deps import require_admin
 from app.auth.errors import AuthError
-from app.auth.service import seed_admin_from_env
+from app.approvals.errors import ApprovalError
+from app.auth.service import seed_admin_from_env, seed_approvers_from_env
 from app.data_loader import load_json
 from app.db import PersistenceError, close_client, ensure_indexes, persistence_mode, ping_database
 from app.db.mongo import db_status
 from app.repositories import get_audit_entries, get_ticket, list_recent_tickets
 from app.routers import admin_tickets as admin_tickets_router
+from app.routers import approvals as approvals_router
 from app.routers import auth as auth_router
 from app.routers import my_tickets as my_tickets_router
 from app.schemas import DraftPO, ReconciliationReport, WorkflowResult
@@ -42,6 +44,10 @@ async def lifespan(_: FastAPI):
                 seed_admin_from_env()
             except Exception as seed_exc:  # noqa: BLE001 - never block startup on admin seeding
                 logger.warning("Admin seeding failed (%s).", type(seed_exc).__name__)
+            try:
+                seed_approvers_from_env()
+            except Exception as seed_exc:  # noqa: BLE001 - never block startup on approver seeding
+                logger.warning("Approver seeding failed (%s).", type(seed_exc).__name__)
         except Exception as exc:  # noqa: BLE001 - start anyway; health reports unavailable
             logger.warning("MongoDB not reachable at startup (%s); persistence endpoints will return 503.",
                            type(exc).__name__)
@@ -75,8 +81,16 @@ async def _ticket_error_handler(_: Request, exc: TicketError):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 
+@app.exception_handler(ApprovalError)
+async def _approval_error_handler(_: Request, exc: ApprovalError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
 app.include_router(my_tickets_router.router)
 app.include_router(admin_tickets_router.router)
+# Registered before the legacy /api/tickets/{ticket_id} routes; only /api/tickets/{id}/approval is opened
+# to owners/approvers, the legacy ticket routes stay admin-only.
+app.include_router(approvals_router.router)
 _ADMIN_ONLY = [Depends(require_admin)]
 
 

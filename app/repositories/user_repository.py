@@ -82,3 +82,29 @@ def upsert_admin(username: str, name: str, email: str, password_hash: str, salt:
         raise PersistenceError("Admin email is already used by another account.") from exc
     except PyMongoError as exc:
         raise PersistenceError() from exc
+
+
+def upsert_approver(username: str, name: str, email: str, password_hash: str, salt: str,
+                    *, db: Optional[Database] = None) -> bool:
+    """Create or refresh a server-configured approver account.
+
+    Only matches documents that are missing or already have role "approver", so an existing user or
+    admin account is never converted. Returns False if the username belongs to another role.
+    """
+    now = _now()
+    username = username.strip().lower()
+    try:
+        _resolve_db(db).users.update_one(
+            {"username": username, "role": "approver"},
+            {
+                "$set": {"name": name, "email": email.strip().lower(), "password_hash": password_hash,
+                         "salt": salt, "updated_at": now, "schema_version": SCHEMA_VERSION},
+                "$setOnInsert": {"created_at": now, "role": "approver", "username": username},
+            },
+            upsert=True,
+        )
+    except DuplicateKeyError:
+        return False  # username (other role) or email already taken
+    except PyMongoError as exc:
+        raise PersistenceError() from exc
+    return True

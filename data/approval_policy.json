@@ -1,0 +1,16 @@
+{
+  "policy_version": "approval-policy-v1",
+  "required_role": "approver",
+  "expiry_hours": 72,
+  "amount_threshold": 50000,
+  "high_risk_amount": 150000,
+  "require_approval_on_warning": true,
+  "comment_required_for": ["reject", "request_changes"],
+  "reason_texts": {
+    "AMOUNT_THRESHOLD": "Draft PO total exceeds the approval threshold (PROC-4.1).",
+    "HIGH_VALUE": "Draft PO total exceeds the high-value threshold (PROC-4.1).",
+    "POLICY_WARNING": "The workflow flagged one or more policy warnings that need human review.",
+    "LARGE_EVENT": "Event exceeds the attendee limit that needs a Facilities review (EVT-2.4).",
+    "PO_REQUIRES_HUMAN_APPROVAL": "Every system-generated draft PO requires human sign-off (PROC-4.1)."
+  }
+}

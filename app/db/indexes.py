@@ -11,6 +11,21 @@ from app.db.errors import PersistenceError
 from app.db.mongo import get_database
 
 
+def _ensure_approval_indexes(db: Database) -> None:
+    coll = db.approval_requests
+    coll.create_index([("approval_id", ASCENDING)], unique=True, name="approval_id_unique")
+    coll.create_index([("ticket_id", ASCENDING), ("request_version", ASCENDING)], unique=True,
+                      name="ticket_version_unique")
+    coll.create_index([("status", ASCENDING), ("created_at", DESCENDING)], name="status_created")
+    coll.create_index([("requester_id", ASCENDING), ("created_at", DESCENDING)], name="requester_created")
+    try:
+        # At most one pending request per ticket. Also enforced in code for backends lacking partial indexes.
+        coll.create_index([("ticket_id", ASCENDING)], unique=True, name="one_pending_per_ticket",
+                          partialFilterExpression={"status": "pending"})
+    except (PyMongoError, NotImplementedError, TypeError):
+        pass
+
+
 def ensure_indexes(db: Optional[Database] = None) -> None:
     db = db if db is not None else get_database()
     try:
@@ -29,5 +44,6 @@ def ensure_indexes(db: Optional[Database] = None) -> None:
         db.users.create_index([("email", ASCENDING)], unique=True, name="email_unique")
         db.sessions.create_index([("token_hash", ASCENDING)], unique=True, name="token_hash_unique")
         db.sessions.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0, name="expires_at_ttl")
+        _ensure_approval_indexes(db)
     except PyMongoError as exc:
         raise PersistenceError("Database unavailable: could not initialize indexes. Please try again later.") from exc

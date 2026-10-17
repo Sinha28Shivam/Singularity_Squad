@@ -11,22 +11,26 @@ from pydantic import BaseModel, Field, field_validator
 
 EMAIL_PATTERN = r"^[^@\s]+@[^@\s]+\.[^@\s]+$"
 
-Role = Literal["user", "admin"]
+Role = Literal["user", "approver", "admin"]
 
-# Ticket lifecycle (tickets.status). Workflow outcome stays in workflow_result.final_status.
+# Ticket lifecycle (tickets.status). Workflow outcome stays in workflow_result.final_status and the
+# Phase 2 approval outcome lives in the approval_requests collection.
 TicketStatus = Literal[
     "submitted",         # created by a user, waiting for an admin to run the workflow
     "processing",        # admin started a run
-    "reviewed",          # workflow finished (pass / warning / blocked); awaiting admin decision
+    "reviewed",          # workflow finished, no approval required or hard-blocked; admin may close it
     "needs_info",        # workflow needs clarification; back with the user for edit & resubmit
-    "approved",          # admin approved the draft PO (final; PO stays draft, nothing purchased)
-    "rejected",          # admin rejected (final)
+    "pending_approval",  # an approval request is pending for an eligible approver (Phase 2)
+    "changes_requested", # approver asked for changes; requester edits & resubmits (Phase 2)
+    "approval_expired",  # approval request expired without a decision (Phase 2)
+    "approved",          # approved by an eligible human (final; PO stays draft, nothing purchased)
+    "rejected",          # rejected (final)
     "failed",            # workflow raised
     "persistence_error", # a database write failed mid-way
 ]
 FINAL_STATUSES = {"approved", "rejected"}
-USER_EDITABLE_STATUSES = {"submitted", "needs_info"}
-RUNNABLE_STATUSES = {"submitted", "reviewed", "needs_info", "failed", "persistence_error"}
+USER_EDITABLE_STATUSES = {"submitted", "needs_info", "changes_requested", "approval_expired"}
+RUNNABLE_STATUSES = {"submitted", "reviewed", "needs_info", "failed", "persistence_error", "approval_expired"}
 
 EventCategory = Literal[
     "team_lunch", "offsite", "celebration", "training_workshop", "town_hall", "client_visit", "other"
@@ -157,6 +161,7 @@ class UserTicketView(BaseModel):
     po_summary: Optional[dict] = None              # {po_id, vendor_name, total, currency, status, approval_status}
     notes: list[TicketNote] = Field(default_factory=list)
     decision: Optional[Decision] = None
+    approval: Optional[dict] = None                # requester-safe approval summary (Phase 2)
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None
 
@@ -176,5 +181,6 @@ class AdminTicketView(BaseModel):
     run_count: int = 0
     last_run_by: Optional[str] = None
     error: Optional[str] = None
+    approval: Optional[dict] = None                # current approval request + history (Phase 2)
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None

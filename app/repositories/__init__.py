@@ -63,3 +63,35 @@ __all__ += [
     "get_session",
     "delete_session",
 ]
+
+from app.repositories.approval_repository import (  # noqa: E402
+    ApprovalConflictError,
+    count_approvals_by_status,
+    create_approval,
+    decide_atomic,
+    find_decision_by_key,
+    get_approval,
+    get_current_for_ticket,
+    get_pending_for_ticket,
+    list_approvals,
+    list_for_ticket,
+    next_version,
+    set_reconciliation,
+    transition_if_pending,
+)
+
+__all__ += [
+    "ApprovalConflictError",
+    "count_approvals_by_status",
+    "create_approval",
+    "decide_atomic",
+    "find_decision_by_key",
+    "get_approval",
+    "get_current_for_ticket",
+    "get_pending_for_ticket",
+    "list_approvals",
+    "list_for_ticket",
+    "next_version",
+    "set_reconciliation",
+    "transition_if_pending",
+]

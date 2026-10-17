@@ -172,8 +172,8 @@ def test_admin_list_counts_and_filter(c, admin, user_headers_factory):
     assert {t["ticket_id"] for t in body["tickets"]} == {t1, t2}
     owners = {t["ticket_id"]: t["owner_username"] for t in body["tickets"]}
     assert owners == {t1: "alice", t2: "bob"}
-    assert body["counts"] == {"reviewed": 1, "submitted": 1}
-    reviewed = c.get("/api/admin/tickets", params={"status": "reviewed"}, headers=admin).json()["tickets"]
+    assert body["counts"] == {"pending_approval": 1, "submitted": 1}
+    reviewed = c.get("/api/admin/tickets", params={"status": "pending_approval"}, headers=admin).json()["tickets"]
     assert [t["ticket_id"] for t in reviewed] == [t1]
     assert reviewed[0]["final_status"] == "pass" and reviewed[0]["run_count"] == 1
     assert c.get("/api/admin/tickets", params={"status": "bogus"}, headers=admin).status_code == 422
@@ -182,51 +182,75 @@ def test_admin_list_counts_and_filter(c, admin, user_headers_factory):
 
 
 # ---------- run / re-run / decide ----------
-def test_run_rerun_approve_flow(c, admin, alice):
+def _sequences_contiguous(events):
+    return [e["sequence"] for e in events] == list(range(1, len(events) + 1))
+
+
+def _approve_as_approver(c, approver, tid, comment="Looks good", key="key-approve-0001"):
+    cur = c.get(f"/api/tickets/{tid}/approval", headers=approver).json()["current"]
+    return c.post(f"/api/approvals/{cur['approval_id']}/decision", headers=approver, json={
+        "action": "approve", "comment": comment, "idempotency_key": key,
+        "request_version": cur["request_version"], "workflow_snapshot_hash": cur["workflow_snapshot_hash"]})
+
+
+def test_run_rerun_approve_flow(c, admin, alice, approver_headers_factory):
     tid = _submit(c, alice)["ticket_id"]
     db = get_database()
 
     r = _run(c, admin, tid)
     assert r.status_code == 200, r.text
     v = r.json()
-    assert v["status"] == "reviewed" and v["run_count"] == 1 and v["last_run_by"] == "admin"
+    assert v["status"] == "pending_approval" and v["run_count"] == 1 and v["last_run_by"] == "admin"
     wr = v["workflow_result"]
     assert wr["persisted"] is True and wr["ticket_id"] == tid and wr["final_status"] == "pass"
+    assert v["approval"]["current"]["status"] == "pending" and v["approval"]["current"]["request_version"] == 1
     po = db.purchase_orders.find_one({"ticket_id": tid})
     assert po["status"] == "draft" and po["po_id"] == "DRAFT-PO-" + tid[4:]
     events = _audit(c, admin, tid)
-    n1 = len(events)
-    assert [e["sequence"] for e in events] == list(range(1, n1 + 1))
+    assert _sequences_contiguous(events)
     assert events[0]["action"] == "submit_ticket" and events[1]["action"] == "start"
+    n1 = len(wr["audit_trail"]) + 1  # submit + workflow events; approval events follow them
     assert [e["step"] for e in wr["audit_trail"]] == list(range(2, n1 + 1))
-    assert [e["action"] for e in wr["audit_trail"]] == [e["action"] for e in events[1:]]
+    assert [e["action"] for e in wr["audit_trail"]] == [e["action"] for e in events[1:n1]]
+    assert [e["action"] for e in events[n1:]] == ["approval_requested"]
 
-    r = _run(c, admin, tid)
+    r = _run(c, admin, tid)  # re-run while pending: v1 superseded, v2 pending
     assert r.status_code == 200, r.text
     v = r.json()
-    assert v["run_count"] == 2
+    assert v["run_count"] == 2 and v["status"] == "pending_approval"
+    assert [a["status"] for a in v["approval"]["history"]] == ["superseded", "pending"]
     events = _audit(c, admin, tid)
-    seqs = [e["sequence"] for e in events]
-    assert seqs == list(range(1, len(seqs) + 1)) and len(seqs) == 1 + 2 * (n1 - 1)
-    assert [e["step"] for e in v["workflow_result"]["audit_trail"]] == list(range(n1 + 1, len(seqs) + 1))
+    assert _sequences_contiguous(events)
+    steps = [e["step"] for e in v["workflow_result"]["audit_trail"]]
+    # v1 is superseded as soon as the re-run claims the ticket, before the new workflow events
+    assert events[n1 + 1]["action"] == "approval_superseded"
+    assert steps == list(range(n1 + 3, n1 + 3 + len(steps)))
+    assert events[-1]["action"] == "approval_requested"
     assert db.purchase_orders.count_documents({"ticket_id": tid}) == 1
 
     user_view = c.get(f"/api/my/tickets/{tid}", headers=alice).json()
-    assert user_view["outcome"] == "Under admin review."
+    assert user_view["outcome"] == "Waiting for approval by an approver."
     assert user_view["po_summary"]["approval_status"] == "pending"
 
+    # admins cannot approve; approval is reserved for an eligible approver
     r = c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "approve", "note": "Looks good"},
                headers=admin)
+    assert r.status_code == 403
+    assert r.json()["detail"] == "Approvals must be decided by an eligible approver via /api/approvals."
+    assert db.tickets.find_one({"ticket_id": tid})["status"] == "pending_approval"
+
+    approver = approver_headers_factory("carol")
+    r = _approve_as_approver(c, approver, tid)
     assert r.status_code == 200, r.text
-    v = r.json()
+    assert r.json()["approval"]["status"] == "approved"
+    v = c.get(f"/api/admin/tickets/{tid}", headers=admin).json()
     assert v["status"] == "approved"
-    assert v["decision"]["decision"] == "approve" and v["decision"]["by"] == "admin"
-    assert v["decision"]["note"] == "Looks good"
+    assert v["workflow_result"]["final_status"] == "pass"  # workflow outcome is never rewritten
     po = db.purchase_orders.find_one({"ticket_id": tid})
-    assert po["approval_status"] == "approved" and po["status"] == "draft" and po["approval_by"] == "admin"
+    assert po["approval_status"] == "approved" and po["status"] == "draft" and po["approval_by"] == "carol"
     events = _audit(c, admin, tid)
-    assert events[-1]["agent"] == "Admin" and events[-1]["action"] == "approve"
-    assert [e["sequence"] for e in events] == list(range(1, len(events) + 1))
+    assert events[-1]["agent"] == "Approver" and events[-1]["action"] == "approval_approved"
+    assert _sequences_contiguous(events)
 
     user_view = c.get(f"/api/my/tickets/{tid}", headers=alice).json()
     assert user_view["status"] == "approved"
@@ -243,18 +267,31 @@ def test_run_rerun_approve_flow(c, admin, alice):
 
 def test_decision_requires_reviewed(c, admin, alice):
     tid = _submit(c, alice)["ticket_id"]
-    r = c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "approve"}, headers=admin)
+    r = c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "reject"}, headers=admin)
     assert r.status_code == 409
+    assert c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "approve"}, headers=admin).status_code == 403
     assert c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "maybe"}, headers=admin).status_code == 422
+    assert get_database().tickets.find_one({"ticket_id": tid})["status"] == "submitted"
+
+
+def test_admin_cannot_reject_pending_approval_via_legacy_decision(c, admin, alice):
+    tid = _submit(c, alice)["ticket_id"]
+    assert _run(c, admin, tid).json()["status"] == "pending_approval"
+    r = c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "reject", "note": "no"}, headers=admin)
+    assert r.status_code == 409
+    assert get_database().tickets.find_one({"ticket_id": tid})["status"] == "pending_approval"
 
 
 def test_blocked_cannot_be_approved_but_can_be_rejected(c, admin, alice):
     tid = _submit(c, alice, OVER_BUDGET)["ticket_id"]
     v = _run(c, admin, tid).json()
     assert v["status"] == "reviewed" and v["workflow_result"]["final_status"] == "blocked"
+    assert v["approval"] is None
     assert get_database().purchase_orders.count_documents({"ticket_id": tid}) == 0
+    assert get_database().approval_requests.count_documents({"ticket_id": tid}) == 0
     r = c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "approve"}, headers=admin)
-    assert r.status_code == 409 and r.json()["detail"].startswith("Cannot approve")
+    assert r.status_code == 403
+    assert get_database().tickets.find_one({"ticket_id": tid})["status"] == "reviewed"
     r = c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "reject", "note": "Over budget"},
                headers=admin)
     assert r.status_code == 200 and r.json()["status"] == "rejected"
@@ -274,7 +311,9 @@ def test_needs_info_then_edit_and_resubmit(c, admin, alice, monkeypatch):
     v = _run(c, admin, tid).json()
     assert v["status"] == "needs_info"
     assert v["workflow_result"]["final_status"] == "needs_clarification"
-    assert c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "approve"}, headers=admin).status_code == 409
+    assert v["approval"] is None
+    assert c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "approve"}, headers=admin).status_code == 403
+    assert c.post(f"/api/admin/tickets/{tid}/decision", json={"decision": "reject"}, headers=admin).status_code == 409
 
     uv = c.get(f"/api/my/tickets/{tid}", headers=alice).json()
     assert uv["outcome"] == "More information needed — please update your request."
@@ -289,7 +328,7 @@ def test_needs_info_then_edit_and_resubmit(c, admin, alice, monkeypatch):
     assert events[-1]["action"] == "resubmit_ticket"
 
     v = _run(c, admin, tid).json()
-    assert v["status"] == "reviewed" and v["run_count"] == 2
+    assert v["status"] == "pending_approval" and v["run_count"] == 2
     events = _audit(c, admin, tid)
     assert [e["sequence"] for e in events] == list(range(1, len(events) + 1))
     assert c.put(f"/api/my/tickets/{tid}", json=HAPPY, headers=alice).status_code == 409
@@ -385,7 +424,7 @@ def test_run_persistence_failure_returns_503_and_retry_works(c, admin, alice, mo
 
     monkeypatch.undo()
     v = _run(c, admin, tid).json()
-    assert v["status"] == "reviewed" and v["run_count"] == 1 and v["error"] is None
+    assert v["status"] == "pending_approval" and v["run_count"] == 1 and v["error"] is None
     events = _audit(c, admin, tid)
     assert [e["sequence"] for e in events] == list(range(1, len(events) + 1))
     assert get_database().purchase_orders.count_documents({"ticket_id": tid}) == 1
@@ -402,7 +441,7 @@ def test_workflow_exception_marks_failed(c, admin, alice, monkeypatch, caplog):
     assert r.status_code == 500 and "kaboom" not in r.text
     assert get_database().tickets.find_one({"ticket_id": tid})["status"] == "failed"
     monkeypatch.undo()
-    assert _run(c, admin, tid).json()["status"] == "reviewed"
+    assert _run(c, admin, tid).json()["status"] == "pending_approval"
 
 
 def test_db_failure_on_submit_returns_503(c, alice, monkeypatch):

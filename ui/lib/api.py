@@ -27,6 +27,7 @@ BACKEND_HELP = (
 # Mirrors app/portal_schemas.py (the UI deliberately does not import the backend package).
 TICKET_STATUSES = [
     "submitted", "processing", "reviewed", "needs_info",
+    "pending_approval", "changes_requested", "approval_expired",
     "approved", "rejected", "failed", "persistence_error",
 ]
 STATUS_BADGE = {
@@ -34,12 +35,35 @@ STATUS_BADGE = {
     "processing": "⚙️",
     "reviewed": "🔎",
     "needs_info": "✏️",
+    "pending_approval": "⏳🛡️",
+    "changes_requested": "✏️",
+    "approval_expired": "⌛",
     "approved": "✅",
     "rejected": "⛔",
     "failed": "⚠️",
     "persistence_error": "⚠️",
 }
-USER_EDITABLE_STATUSES = {"submitted", "needs_info"}
+USER_EDITABLE_STATUSES = {"submitted", "needs_info", "changes_requested", "approval_expired"}
+
+# Mirrors app/approvals/schemas.py.
+APPROVAL_STATUSES = ["pending", "approved", "rejected", "changes_requested", "expired", "superseded"]
+APPROVAL_STATUS_BADGE = {
+    "pending": "⏳",
+    "approved": "✅",
+    "rejected": "⛔",
+    "changes_requested": "✏️",
+    "expired": "⌛",
+    "superseded": "↪️",
+}
+APPROVAL_ACTIONS = {"approve": "Approve", "reject": "Reject", "request_changes": "Request changes"}
+COMMENT_REQUIRED_ACTIONS = {"reject", "request_changes"}
+APPROVAL_SAFETY_NOTICE = "Approval records internal authorization only. No order or payment is executed."
+PO_DRAFT_LABEL = "Draft — no order placed, nothing paid"
+RISK_BADGE = {"low": "🟢 low", "medium": "🟠 medium", "high": "🔴 high"}
+
+
+def approval_badge(status: Optional[str]) -> str:
+    return f"{APPROVAL_STATUS_BADGE.get(status or '', '❔')} {(status or 'unknown').replace('_', ' ')}"
 EVENT_CATEGORY_LABELS: dict[str, str] = {
     "team_lunch": "Team lunch",
     "offsite": "Team offsite",

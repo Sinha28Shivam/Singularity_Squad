@@ -207,7 +207,8 @@ def render_final_status(result: dict) -> None:
                 st.markdown(f"**🧑‍⚖️ Human approval required:** {approver or 'reviewer (no draft PO yet)'}")
             else:
                 st.markdown("**Human approval:** not flagged by backend (still draft-only).")
-            st.caption("Use the ticket actions above to approve or reject. The PO always stays a draft.")
+            st.caption("Sign-off is recorded by an eligible approver on the Approvals page. "
+                       "The PO always stays a draft — no order placed, nothing paid.")
 
 
 # --------------------------------------------------------------------------- tabs
@@ -310,6 +311,7 @@ def tab_po(result: dict) -> None:
             f"**{po.get('po_id')}** · status `{str(po.get('status', 'draft')).upper()}` · vendor {po.get('vendor_name')} "
             f"({po.get('vendor_id')}) · event date {po.get('event_date')}"
         )
+        st.caption("Draft — no order placed, nothing paid.")
         rows = [
             {
                 "Description": li.get("description"),

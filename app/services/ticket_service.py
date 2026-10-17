@@ -16,6 +16,9 @@ import secrets
 from datetime import date, datetime, timezone
 from typing import Optional
 
+from app.approvals import service as approval_service
+from app.approvals.policy import evaluate_approval_requirement
+from app.approvals.schemas import APPROVAL_SAFETY_NOTICE
 from app.db import PersistenceError, ensure_indexes, get_client, persistence_mode
 from app.orchestrator import run_workflow
 from app.portal_schemas import (
@@ -266,14 +269,41 @@ def _shift_audit(result: WorkflowResult, offset: int) -> None:
         result.audit_trail = [e.model_copy(update={"step": e.step + offset}) for e in result.audit_trail]
 
 
+_POLICY_UNAVAILABLE_MSG = ("Approval policy could not be evaluated; no approval request was created. "
+                           "Please re-run the workflow later.")
+ADMIN_APPROVE_FORBIDDEN = "Approvals must be decided by an eligible approver via /api/approvals."
+# A pending approval may be re-run by an admin: the old request is superseded and a new version created.
+_RUN_CLAIMABLE = set(RUNNABLE_STATUSES) | {"pending_approval"}
+
+
+def _fail_run(ticket_id: str, exc: Exception) -> None:
+    logger.error("Persistence failed for ticket %s (%s)", ticket_id, type(exc).__name__)
+    _mark_best_effort(ticket_id, "persistence_error", f"Persistence error: {type(exc).__name__}")
+    if isinstance(exc, PersistenceError):
+        raise exc
+    raise PersistenceError(_PERSIST_FAILED_MSG) from exc
+
+
 def run_ticket(ticket_id: str, admin: UserPublic, invoice_id: Optional[str] = None,
                today: Optional[date] = None) -> dict:
+    """Run the workflow for a portal ticket and map the outcome to the ticket/approval lifecycle.
+
+    The snapshot is committed with status ``processing``; only after the approval request (if required)
+    exists does the ticket move to ``pending_approval`` / ``needs_info`` / ``reviewed``. Policy evaluation
+    fails closed: no approval request is created and the caller gets 503.
+    """
     _require_persistence()
     doc = _load(ticket_id)
-    if doc.get("status") not in RUNNABLE_STATUSES:
-        raise TicketError(409, f"Ticket cannot be run while status is '{doc.get('status')}'.")
-    if not set_status(ticket_id, "processing", expected=RUNNABLE_STATUSES):
+    previous = doc.get("status")
+    if previous not in _RUN_CLAIMABLE:
+        raise TicketError(409, f"Ticket cannot be run while status is '{previous}'.")
+    if not set_status(ticket_id, "processing", expected=_RUN_CLAIMABLE):
         raise TicketError(409, "Ticket is already being processed or is no longer runnable.")
+    if previous == "pending_approval":
+        try:  # the old request must not stay approvable while its content is being re-evaluated
+            approval_service.supersede_pending(ticket_id, "rerun")
+        except Exception as exc:  # noqa: BLE001
+            _fail_run(ticket_id, exc)
 
     try:
         result = run_workflow(doc.get("raw_text") or "", today, invoice_id, request_id=ticket_id)
@@ -283,50 +313,74 @@ def run_ticket(ticket_id: str, admin: UserPublic, invoice_id: Optional[str] = No
         raise TicketError(500, "Workflow failed; the ticket was marked as failed.") from None
 
     result.ticket_id = ticket_id
-    new_status = "needs_info" if result.final_status == "needs_clarification" else "reviewed"
+    requirement = None
+    try:
+        requirement = evaluate_approval_requirement(result.model_dump(mode="json"))
+    except Exception as exc:  # noqa: BLE001 - fail closed below
+        logger.error("Approval policy evaluation failed for ticket %s (%s)", ticket_id, type(exc).__name__)
+
     try:
         _shift_audit(result, get_last_sequence(ticket_id))
         persist_result(ticket_id, result, commit=lambda snap, at: save_run_result(
-            ticket_id, snap, new_status, admin.username, at))
-    except Exception as exc:
+            ticket_id, snap, "processing", admin.username, at))
+    except Exception as exc:  # noqa: BLE001
         result.persisted = False
-        logger.error("Persistence failed for ticket %s (%s)", ticket_id, type(exc).__name__)
-        _mark_best_effort(ticket_id, "persistence_error", f"Persistence error: {type(exc).__name__}")
-        if isinstance(exc, PersistenceError):
-            raise
-        raise PersistenceError(_PERSIST_FAILED_MSG) from exc
+        _fail_run(ticket_id, exc)
+
+    if requirement is None:
+        try:
+            approval_service.supersede_pending(ticket_id, "policy_unavailable")
+            set_status(ticket_id, "reviewed", expected={"processing"}, error="Approval policy unavailable.")
+        except Exception as exc:  # noqa: BLE001
+            _fail_run(ticket_id, exc)
+        raise TicketError(503, _POLICY_UNAVAILABLE_MSG)
+
+    if requirement.needs_clarification or result.final_status == "needs_clarification":
+        new_status = "needs_info"
+    elif requirement.required and not requirement.blocked:
+        new_status = "pending_approval"
+    else:
+        new_status = "reviewed"
+    try:
+        approval = approval_service.on_workflow_completed(_load(ticket_id), result.model_dump(mode="json"),
+                                                          requirement)
+        if new_status == "pending_approval" and not approval:
+            raise PersistenceError("Approval request could not be created.")
+        if not set_status(ticket_id, new_status, expected={"processing", new_status}):
+            raise PersistenceError("Ticket status changed while the run was being finalised.")
+    except Exception as exc:  # noqa: BLE001
+        try:  # never leave an approvable request behind a ticket that is not pending_approval
+            approval_service.supersede_pending(ticket_id, "run_finalisation_failed")
+        except Exception:  # noqa: BLE001 - best effort; a re-run supersedes it as well
+            pass
+        _fail_run(ticket_id, exc)
     return _load(ticket_id)
 
 
 def decide_ticket(ticket_id: str, admin: UserPublic, decision: str, note: Optional[str] = None) -> dict:
+    """Legacy admin decision. Admins may only close (reject) a ``reviewed`` ticket — one that needed no
+    approval or is hard-blocked. Approving is reserved for eligible approvers via /api/approvals."""
     _require_persistence()
     if decision not in ("approve", "reject"):
         raise TicketError(422, "Decision must be 'approve' or 'reject'.")
+    if decision == "approve":
+        raise TicketError(403, ADMIN_APPROVE_FORBIDDEN)
     doc = _load(ticket_id)
+    if doc.get("status") == "pending_approval":
+        raise TicketError(409, "Ticket has a pending approval request; it must be decided via /api/approvals.")
     if doc.get("status") != "reviewed":
         raise TicketError(409, f"Ticket cannot be decided while status is '{doc.get('status')}'.")
     wr = doc.get("workflow_result") or {}
     po = (wr.get("procurement") or {}).get("po")
-    if decision == "approve":
-        if not po:
-            raise TicketError(409, "Cannot approve: no draft PO was produced for this ticket.")
-        if wr.get("final_status") not in ("pass", "warning"):
-            raise TicketError(409, f"Cannot approve: workflow outcome is '{wr.get('final_status')}'.")
 
     at = _now()
     note = (note or "").strip() or None
     record = Decision(decision=decision, by=admin.username, at=at, note=note).model_dump()
-    new_status = "approved" if decision == "approve" else "rejected"
-    if not set_decision(ticket_id, record, new_status, expected={"reviewed"}):
+    if not set_decision(ticket_id, record, "rejected", expected={"reviewed"}):
         raise TicketError(409, "Ticket status changed; please reload and try again.")
-    if po:
-        approval = "approved" if decision == "approve" else "rejected"
-        if not set_po_approval(po["po_id"], approval, admin.username, at):
-            logger.warning("Draft PO for ticket %s not found while recording decision", ticket_id)
-    detail = (f"Draft PO {po['po_id']} approved by {admin.username}. PO remains a draft; nothing was "
-              "purchased or issued." if decision == "approve" and po
-              else f"Ticket rejected by {admin.username}.")
-    _audit_event(ticket_id, "Admin", decision, detail)
+    if po and not set_po_approval(po["po_id"], "rejected", admin.username, at):
+        logger.warning("Draft PO for ticket %s not found while recording decision", ticket_id)
+    _audit_event(ticket_id, "Admin", decision, f"Ticket rejected by {admin.username}.")
     if note:
         push_note(ticket_id, _note(admin, note))
     return _load(ticket_id)
@@ -357,6 +411,11 @@ def user_update_ticket(ticket_id: str, user: UserPublic, sub: TicketSubmission) 
     if not update_submission(ticket_id, sub.model_dump(mode="json"), build_request_text(sub),
                              expected=USER_EDITABLE_STATUSES):
         raise TicketError(409, "Ticket status changed; it can no longer be edited.")
+    if doc.get("status") in ("changes_requested", "approval_expired"):
+        try:  # defensive: an edited request must never be authorised by an older approval version
+            approval_service.supersede_pending(ticket_id, "resubmitted")
+        except Exception as exc:  # noqa: BLE001 - the next admin run supersedes it as well
+            logger.warning("Could not supersede approval for ticket %s (%s)", ticket_id, type(exc).__name__)
     _audit_event(ticket_id, "User", "resubmit_ticket", f"Ticket updated and resubmitted by {user.username}.")
     return _load(ticket_id)
 
@@ -410,22 +469,31 @@ def _po(doc: dict) -> Optional[dict]:
     return ((doc.get("workflow_result") or {}).get("procurement") or {}).get("po")
 
 
+_PO_SUMMARY_STATUSES = {"reviewed", "pending_approval", "changes_requested", "approval_expired",
+                        "approved", "rejected"}
+
+
 def _po_summary(doc: dict) -> Optional[dict]:
     po = _po(doc)
-    if not po or doc.get("status") not in ("reviewed", "approved", "rejected"):
+    if not po or doc.get("status") not in _PO_SUMMARY_STATUSES:
         return None
-    dec = (doc.get("decision") or {}).get("decision")
     return {
         "po_id": po.get("po_id"),
         "vendor_name": po.get("vendor_name"),
         "total": po.get("total"),
         "currency": po.get("currency", "INR"),
         "status": po.get("status", "draft"),
-        "approval_status": {"approve": "approved", "reject": "rejected"}.get(dec, "pending"),
+        "approval_status": {"approved": "approved", "rejected": "rejected"}.get(doc.get("status"), "pending"),
     }
 
 
-def _outcome(doc: dict) -> str:
+def _last_decision_comment(approval: Optional[dict]) -> Optional[str]:
+    current = (approval or {}).get("current") or {}
+    decisions = current.get("decisions") or []
+    return (decisions[-1].get("comment") or None) if decisions else None
+
+
+def _outcome(doc: dict, approval: Optional[dict] = None) -> str:
     status = doc.get("status")
     if status == "submitted":
         return "Waiting for an admin to review your request."
@@ -435,6 +503,12 @@ def _outcome(doc: dict) -> str:
         return "Under admin review."
     if status == "needs_info":
         return "More information needed — please update your request."
+    if status == "pending_approval":
+        return "Waiting for approval by an approver."
+    if status == "changes_requested":
+        return "Changes requested — please update your request."
+    if status == "approval_expired":
+        return "Approval request expired — an admin will re-run it."
     if status == "approved":
         po = _po(doc) or {}
         total = po.get("total")
@@ -442,11 +516,63 @@ def _outcome(doc: dict) -> str:
         return (f"Approved — draft PO {po.get('po_id', '')}{amount} recorded. "
                 "No purchase has been made yet.")
     if status == "rejected":
-        note = ((doc.get("decision") or {}).get("note") or "").strip()
-        return "Rejected by admin." + (f" Note: {note}" if note else "")
+        if doc.get("decision"):
+            note = ((doc.get("decision") or {}).get("note") or "").strip()
+            return "Rejected by admin." + (f" Note: {note}" if note else "")
+        comment = _last_decision_comment(approval)
+        return "Rejected by an approver." + (f" Note: {comment}" if comment else "")
     if status in ("failed", "persistence_error"):
         return "Processing failed; an admin will retry."
     return "Status unavailable."
+
+
+# ---------- approval info embedded in ticket views ----------
+_REQUESTER_APPROVAL_FIELDS = ("approval_id", "request_version", "status", "reason_codes", "reasons", "risk_level",
+                              "amount", "currency", "required_role", "requester_id", "created_at", "expires_at",
+                              "decided_at")
+
+
+def _ticket_approval(doc: dict, viewer: UserPublic) -> Optional[dict]:
+    """TicketApprovalView for this ticket as a JSON dict, or None if the ticket never had a request."""
+    try:
+        view = approval_service.ticket_approval_view(doc["ticket_id"], viewer, ticket=doc)
+    except PersistenceError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - ApprovalError (404/none) or legacy data: no approval panel
+        if getattr(exc, "status_code", None) not in (404, None):
+            logger.warning("Approval info unavailable for ticket %s (%s)", doc.get("ticket_id"),
+                           type(exc).__name__)
+        return None
+    data = view.model_dump(mode="json") if hasattr(view, "model_dump") else dict(view)
+    if not data.get("current") and not data.get("history"):
+        return None
+    return data
+
+
+def requester_approval(data: Optional[dict]) -> Optional[dict]:
+    """Requester-safe projection: status, reasons, amount, history with comments, safety notice.
+    Excludes the review snapshot (vendor/line items), hashes and idempotency keys."""
+    if not data:
+        return None
+
+    def project(a: dict) -> dict:
+        out = {k: a.get(k) for k in _REQUESTER_APPROVAL_FIELDS}
+        out["decisions"] = [{"action": d.get("action"), "actor_id": d.get("actor_id"),
+                             "actor_role": d.get("actor_role"), "comment": d.get("comment"),
+                             "decided_at": d.get("decided_at")} for d in a.get("decisions") or []]
+        return out
+
+    current = data.get("current")
+    return {
+        "current": project(current) if current else None,
+        "history": [project(a) for a in data.get("history") or []],
+        "safety_notice": APPROVAL_SAFETY_NOTICE,
+    }
+
+
+def _owner_viewer(doc: dict) -> UserPublic:
+    return UserPublic(username=doc.get("owner_username") or "", name=doc.get("owner_name") or "",
+                      email=doc.get("owner_email") or "", role="user")
 
 
 def to_user_view(doc: dict) -> UserTicketView:
@@ -454,22 +580,28 @@ def to_user_view(doc: dict) -> UserTicketView:
     questions = []
     if doc.get("status") == "needs_info":
         questions = list((doc.get("workflow_result") or {}).get("clarification_questions") or [])
+    approval = _ticket_approval(doc, _owner_viewer(doc)) if doc.get("owner_username") else None
     return UserTicketView(
         ticket_id=doc["ticket_id"],
         status=doc.get("status") or "unknown",
         submission=sub,
-        outcome=_outcome(doc),
+        outcome=_outcome(doc, approval),
         clarification_questions=questions,
         po_summary=_po_summary(doc),
         notes=_notes(doc),
         decision=_decision(doc),
+        approval=requester_approval(approval),
         created_at=doc.get("created_at"),
         updated_at=doc.get("updated_at"),
     )
 
 
-def to_admin_view(doc: dict) -> AdminTicketView:
+_SYSTEM_ADMIN_VIEWER = UserPublic(username="", name="Admin", email="", role="admin")
+
+
+def to_admin_view(doc: dict, viewer: Optional[UserPublic] = None) -> AdminTicketView:
     return AdminTicketView(
+        approval=_ticket_approval(doc, viewer or _SYSTEM_ADMIN_VIEWER),
         ticket_id=doc["ticket_id"],
         status=doc.get("status") or "unknown",
         owner_username=doc.get("owner_username"),

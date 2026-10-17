@@ -1,14 +1,15 @@
 # WorkplaceOps AI — Request-to-Payment Copilot (hackathon MVP)
 
 Multi-agent workflow: **Intake → Policy Advisor (local BM25 RAG + citations) → Vendor Matcher (re-plans on conflict) → Procurement (deterministic costing, draft PO) → Billing Guardian (3-way invoice match, duplicate check) → Critic → Human approval gate.**
-All data is synthetic. Draft PO only: the system makes no purchase and approves or pays nothing. See [the guide](WorkplaceOps_AI_Hackathon_Guide.md).
+All data is synthetic. Draft PO only: the system makes no purchase and approves or pays nothing. See [the guide](Docs/WorkplaceOps_AI_Hackathon_Guide.md).
 
-Execution flow, function call sequence and file dependencies: see [flow.md](flow.md).
+Execution flow, function call sequence and file dependencies: see [Docs/flow.md](Docs/flow.md). Phase specs live in [Docs/](Docs/), including [Phase 2 Approval Safety](Docs/PHASE_2_APPROVAL_SAFETY.md).
 
-**Two roles (one Streamlit app):**
-- **Users** sign up, fill in an event request form (category, catering service, date, attendees, budget, location, notes) and track their own tickets: status, outcome, admin notes, and edit & resubmit when more info is needed.
-- **Admins** log in with the account from `.env` and get a queue of all tickets. They run or re-run the multi-agent workflow (with a demo invoice) and see every result tab. They approve or reject the draft PO with a note.
-- Approving only records the decision; the PO stays a draft.
+**Three roles (one Streamlit app):**
+- **Users** sign up, fill in an event request form (category, catering service, date, attendees, budget, location, notes) and track their own tickets: status, outcome, approval panel, and edit & resubmit when more info or changes are requested.
+- **Admins** log in with the account from `.env` and get a queue of all tickets. They run or re-run the multi-agent workflow (with a demo invoice) and see every result tab. They can reject hard-blocked tickets, but they **cannot approve**.
+- **Approvers** (server-configured via `APPROVER_ACCOUNTS`) decide approval requests on the **Approvals** page: approve, reject or request changes, with a confirmation step. Nobody can approve their own request.
+- Every draft PO needs an approver's sign-off. Approval records an internal authorization only: the PO stays a draft, and no order or payment is executed.
 
 ## Run
 ```powershell
@@ -34,6 +35,7 @@ Stop-Process -Id <PID>
 - `WORKPLACEOPS_OFFLINE=1` forces deterministic mode.
 - `MONGODB_URI` (default `mongodb://localhost:27017/`), `MONGODB_DATABASE` (default `workplaceops`).
 - `ADMIN_USERNAME`, `ADMIN_PASSWORD`: the admin account is created or updated at API startup. If unset there is no admin; there is no default password.
+- `APPROVER_ACCOUNTS`: approver accounts as `user:password[,user2:password2]`, created at API startup. Demo auth only; approvers can't self-register, and an existing user or admin is never escalated.
 - `SESSION_TTL_HOURS` (default 8): login session lifetime. Optional: `ADMIN_NAME`, `ADMIN_EMAIL`.
 - `WORKPLACEOPS_PERSISTENCE`: `required` (default; DB write failures return 503) or `disabled` (no database).
 
@@ -58,6 +60,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 - `app/routers/`: auth, user (`/api/my/*`) and admin (`/api/admin/*`) endpoints.
 - `app/auth/`: password hashing, sessions, `current_user` / `require_admin`.
 - `app/services/`: ticket service (submit, run, decide, notes, resubmit; persistence).
+- `app/approvals/`: Phase 2 approval policy (deterministic), versioned approval requests and decisions. `app/routers/approvals.py` holds `/api/approvals*`.
 - `app/repositories/`, `app/db/`: the MongoDB data-access layer and shared client.
 - `ui/app.py`: Streamlit entry point (login, User portal, Admin console in `ui/pages_portal/`). `ui/streamlit_app.py` is a shim that runs it.
 - `data/`: synthetic vendors, policies, invoices and deliveries.

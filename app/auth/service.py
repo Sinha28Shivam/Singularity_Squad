@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 import secrets
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -22,6 +23,7 @@ DUPLICATE_MSG = "Username or email already registered."
 INVALID_LOGIN_MSG = "Invalid username or password."
 DEFAULT_ADMIN_NAME = "Operations Admin"
 DEFAULT_ADMIN_EMAIL = "admin@workplaceops.local"
+_USERNAME_RE = re.compile(r"^[a-z0-9_.-]{3,32}$")
 
 # Used to spend comparable time when the username is unknown (reduces user enumeration via timing).
 _DUMMY_HASH, _DUMMY_SALT = hash_password(secrets.token_urlsafe(16))
@@ -137,3 +139,49 @@ def seed_admin_from_env() -> bool:
     user_repository.upsert_admin(username, name, email, password_hash, salt)
     logger.info("Admin account seeded/refreshed from environment.")
     return True
+
+
+def _parse_approver_accounts(raw: str) -> list[tuple[str, str]]:
+    out = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        username, sep, password = entry.partition(":")
+        username = username.strip().lower()
+        if not sep or not username or not password or not _USERNAME_RE.match(username):
+            logger.warning("Ignoring a malformed APPROVER_ACCOUNTS entry.")
+            continue
+        out.append((username, password))
+    return out
+
+
+def seed_approvers_from_env() -> int:
+    """Create/refresh approver accounts from APPROVER_ACCOUNTS="user:pass[,user2:pass2]".
+
+    Demo-grade, server-side configuration only (signup can never create an approver). Existing user or
+    admin accounts are never escalated or changed; conflicting entries are skipped with a warning.
+    Returns the number of approver accounts seeded/refreshed.
+    """
+    raw = os.getenv("APPROVER_ACCOUNTS") or ""
+    count = 0
+    for username, password in _parse_approver_accounts(raw):
+        existing = user_repository.get_user_by_username(username)
+        if existing is not None and existing.get("role") != "approver":
+            logger.warning("An APPROVER_ACCOUNTS username matches an existing non-approver account; "
+                           "refusing to change its role.")
+            continue
+        email = f"{username}@approvers.workplaceops.local"
+        by_email = user_repository.get_user_by_email(email)
+        if by_email is not None and by_email.get("username") != username:
+            logger.warning("An APPROVER_ACCOUNTS email is already used by another account; skipped.")
+            continue
+        name = (existing or {}).get("name") or f"Approver {username}"
+        password_hash, salt = hash_password(password)
+        if user_repository.upsert_approver(username, name, email, password_hash, salt):
+            count += 1
+        else:
+            logger.warning("An approver account could not be seeded (conflicting account); skipped.")
+    if count:
+        logger.info("%d approver account(s) seeded/refreshed from environment.", count)
+    return count

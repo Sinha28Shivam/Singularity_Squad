@@ -11,6 +11,8 @@ from ui.lib.api import (
     EVENT_CATEGORY_LABELS, SERVICES, USER_EDITABLE_STATUSES, api_get, api_post, api_put, badge,
     current_user, friendly_error,
 )
+from ui.lib.api import PO_DRAFT_LABEL
+from ui.lib.approval_render import render_ticket_approval_panel, ticket_approval
 from ui.lib.render import format_inr
 
 DEFAULT_EVENT_DATE = date(2026, 10, 23)
@@ -124,8 +126,14 @@ def render_user_ticket(view: dict) -> None:
         m2.metric("Vendor", po.get("vendor_name") or "—")
         m3.metric("Total", format_inr(po.get("total")))
         approval = po.get("approval_status")
-        st.caption(f"Draft — no purchase made. PO status: {po.get('status', 'draft')}"
-                   + (f" · approval: {approval}" if approval else ""))
+        st.caption(f"{PO_DRAFT_LABEL}. PO status: {po.get('status', 'draft')}"
+                   + (f" · internal approval: {approval}" if approval else ""))
+
+    tav, tav_error = ticket_approval(view)
+    if tav_error:
+        st.warning(f"Approval details unavailable: {tav_error}")
+    elif tav is not None or status in ("pending_approval", "changes_requested", "approval_expired"):
+        render_ticket_approval_panel(tav)
 
     sub = view.get("submission") or {}
     st.subheader("Submitted details")
@@ -147,6 +155,8 @@ def render_user_ticket(view: dict) -> None:
     if isinstance(decision, dict) and decision:
         verb = "Approved" if decision.get("decision") == "approve" else "Rejected"
         msg = f"**{verb}** by {decision.get('by', 'admin')} at {decision.get('at', '?')}"
+        if verb == "Approved":
+            msg += " — internal authorization only; no order placed, nothing paid"
         if decision.get("note"):
             msg += f" — “{decision['note']}”"
         (st.success if verb == "Approved" else st.error)(msg)
@@ -170,6 +180,12 @@ def render_user_ticket(view: dict) -> None:
         st.subheader("✏️ Edit & resubmit")
         if status == "needs_info":
             st.caption("Update the details to answer the questions above, then resubmit.")
+        elif status == "changes_requested":
+            st.caption("The approver asked for changes (see the comments above). Update the details and resubmit "
+                       "— an admin will re-run the workflow and a new approval version will be created.")
+        elif status == "approval_expired":
+            st.caption("The approval request expired without a decision. You can update and resubmit the "
+                       "request; an admin can also re-run it as is.")
         payload = submission_form(f"edit_ticket_form_{tid}", defaults=sub, submit_label="Resubmit request")
         if payload is not None:
             try:
@@ -186,7 +202,7 @@ def render_notes(notes: list[dict]) -> None:
         st.caption("No notes yet.")
         return
     for n in notes:
-        who = "🛠️ Admin" if n.get("role") == "admin" else "🙋 Requester"
+        who = {"admin": "🛠️ Admin", "approver": "🛡️ Approver"}.get(n.get("role"), "🙋 Requester")
         st.markdown(f"**{who} · {n.get('author', '?')}** · {n.get('created_at', '')}\n\n{n.get('text', '')}")
 
 

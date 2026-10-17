@@ -21,6 +21,7 @@ HEALTH = {"status": "ok", "llm_enabled": False, "model": "gpt-4o-mini",
           "database": "connected", "persistence": "required"}
 INVOICES = [{"invoice_id": "INV-5001"}, {"invoice_id": "INV-5002"}, {"invoice_id": "INV-4987"}]
 NOW = "2026-10-17T04:00:00+00:00"
+SAFETY = "Approval records internal authorization only. No order or payment is executed."
 
 
 class FakeResponse:
@@ -66,13 +67,22 @@ class FakeBackend:
                       "password": "alice-pass-1"},
             "admin": {"username": "admin", "name": "Ops Admin", "email": "admin@example.com", "role": "admin",
                       "password": "admin-pass-123"},
+            "carol": {"username": "carol", "name": "Carol Approver", "email": "carol@example.com",
+                      "role": "approver", "password": "carol-pass-123"},
         }
         self.tokens: dict[str, str] = {}
         self.tickets: dict[str, dict] = {}
+        self.approvals: dict[str, dict] = {}
         self.calls: list[tuple] = []
         self.run_sample = "happy_path"
         self.expire_all = False
+        # Fault injection for POST /api/approvals/{id}/decision: each entry is popped per call.
+        #   int status  -> respond with that error and do not commit
+        #   "commit_503" -> commit the decision but answer 503 (lost response)
+        self.decision_faults: list = []
+        self.reconcile_on_decide = False
         self._n = 0
+        self._a = 0
 
     # ---- helpers
     def login_token(self, username: str) -> dict:
@@ -106,6 +116,154 @@ class FakeBackend:
         }
         return tid
 
+    # ---- approvals (mirrors app/approvals/schemas.py + the Phase 2 HTTP contract)
+    def add_approval(self, tid: str, status: str = "pending", amount: float = 59000.0,
+                     reason_codes=("PO_REQUIRES_HUMAN_APPROVAL", "AMOUNT_THRESHOLD"), risk_level="medium") -> str:
+        t = self.tickets[tid]
+        for a in self.approvals.values():
+            if a["ticket_id"] == tid and a["status"] == "pending":
+                a["status"] = "superseded"
+        version = 1 + max([a["request_version"] for a in self.approvals.values() if a["ticket_id"] == tid],
+                          default=0)
+        self._a += 1
+        aid = f"APR-20261017-{self._a:08x}"
+        texts_ = {"PO_REQUIRES_HUMAN_APPROVAL": "Every system-generated draft PO requires human sign-off (PROC-4.1).",
+                  "AMOUNT_THRESHOLD": "Draft PO total exceeds the approval threshold (PROC-4.1).",
+                  "HIGH_VALUE": "Draft PO total exceeds the high-value threshold (PROC-4.1)."}
+        sub = t.get("submission") or {}
+        self.approvals[aid] = {
+            "approval_id": aid, "ticket_id": tid, "request_version": version, "ticket_version": t["run_count"],
+            "status": status, "requester_id": t["owner_username"], "required_role": "approver",
+            "assigned_approver_id": None, "reason_codes": list(reason_codes),
+            "reasons": [texts_.get(c, c) for c in reason_codes], "risk_level": risk_level,
+            "amount": amount, "currency": "INR", "policy_version": "approval-policy-v1",
+            "workflow_snapshot_hash": (f"{self._a:02x}" * 32)[:64],
+            "review_snapshot": {"ticket_id": tid, "run_count": t["run_count"], "final_status": "pass",
+                                "request": {"date": sub.get("event_date"), "attendees": sub.get("attendees"),
+                                            "budget_limit": sub.get("budget_inr"), "service": sub.get("service"),
+                                            "location": sub.get("location")},
+                                "po": {"po_id": "PO-TEST-0001", "vendor_id": "V-001", "vendor_name": "Spice Route",
+                                       "line_items": [{"description": "Lunch", "quantity": 100,
+                                                       "unit_price": 500.0, "line_total": 50000.0}],
+                                       "subtotal": 50000.0, "tax": 9000.0, "total": amount, "currency": "INR",
+                                       "required_approver": "Finance"}},
+            "created_at": NOW, "expires_at": "2026-10-20T04:00:00+00:00", "decided_at": None,
+            "decisions": [], "reconciliation_required": False, "schema_version": 1,
+        }
+        if status == "pending":
+            t["status"] = "pending_approval"
+        return aid
+
+    def approval_view(self, a: dict, viewer: dict) -> dict:
+        reason = None
+        if viewer["role"] != "approver":
+            reason = "Only users with the approver role can decide approval requests."
+        elif viewer["username"] == a["requester_id"]:
+            reason = "You cannot decide your own request."
+        elif a["status"] != "pending":
+            reason = f"This request is already {a['status']}."
+        return dict(json.loads(json.dumps(a)), can_decide=reason is None, cannot_decide_reason=reason,
+                    safety_notice=SAFETY)
+
+    def ticket_approval_view(self, tid: str, viewer: dict):
+        hist = sorted([a for a in self.approvals.values() if a["ticket_id"] == tid],
+                      key=lambda a: a["request_version"])
+        if not hist:
+            return None
+        views = [self.approval_view(a, viewer) for a in hist]
+        return {"ticket_id": tid, "requirement": None, "current": views[-1], "history": views,
+                "safety_notice": SAFETY}
+
+    def _visible(self, a: dict, user: dict) -> bool:
+        return user["role"] in ("approver", "admin") or a["requester_id"] == user["username"]
+
+    def _approvals_api(self, method, path, params, body, user):
+        m = re.match(r"^/api/admin/approvals/([^/]+)/reconcile$", path)
+        if m:
+            if user["role"] != "admin":
+                return FakeResponse(403, {"detail": "Admin access required."})
+            a = self.approvals.get(m.group(1))
+            if not a:
+                return FakeResponse(404, {"detail": "Approval request not found."})
+            a["reconciliation_required"] = False
+            return FakeResponse(200, self.approval_view(a, user))
+        m = re.match(r"^/api/tickets/([^/]+)/approval$", path)
+        if m:
+            t = self.tickets.get(m.group(1))
+            if not t or (user["role"] == "user" and t["owner_username"] != user["username"]):
+                return FakeResponse(404, {"detail": "Ticket not found."})
+            tav = self.ticket_approval_view(t["ticket_id"], user)
+            return FakeResponse(200, tav or {"ticket_id": t["ticket_id"], "current": None, "history": [],
+                                             "safety_notice": SAFETY})
+        if path == "/api/approvals" and method == "GET":
+            if user["role"] not in ("approver", "admin"):
+                return FakeResponse(403, {"detail": "Approver or admin access required."})
+            counts: dict = {}
+            for a in self.approvals.values():
+                counts[a["status"]] = counts.get(a["status"], 0) + 1
+            rows = [{k: a[k] for k in ("approval_id", "ticket_id", "request_version", "status", "requester_id",
+                                       "amount", "currency", "risk_level", "reason_codes", "created_at",
+                                       "expires_at")}
+                    | {"summary": "Team lunch · 100 attendees · 2026-10-23",
+                       "can_decide": self.approval_view(a, user)["can_decide"]}
+                    for a in self.approvals.values() if not params.get("status") or a["status"] == params["status"]]
+            return FakeResponse(200, {"approvals": rows, "counts": counts})
+        m = re.match(r"^/api/approvals/([^/]+)(/decision)?$", path)
+        if not m:
+            return None
+        a = self.approvals.get(m.group(1))
+        if not a or not self._visible(a, user):
+            return FakeResponse(404, {"detail": "Approval request not found."})
+        if not m.group(2):
+            return FakeResponse(200, self.approval_view(a, user))
+        fault = self.decision_faults.pop(0) if self.decision_faults else None
+        if isinstance(fault, int):
+            return FakeResponse(fault, {"detail": "Database unavailable. Please try again later."
+                                        if fault == 503 else "The request has changed; reload and review the "
+                                                             "latest version."})
+        allowed = {"action", "comment", "idempotency_key", "request_version", "workflow_snapshot_hash"}
+        if set(body) - allowed or not body.get("idempotency_key"):
+            return FakeResponse(422, {"detail": "Invalid decision body."})
+        if user["role"] != "approver":
+            return FakeResponse(403, {"detail": "Only an eligible approver can decide approval requests."})
+        if user["username"] == a["requester_id"]:
+            return FakeResponse(403, {"detail": "You cannot decide your own request."})
+        comment = (body.get("comment") or "").strip() or None
+        if body["action"] in ("reject", "request_changes") and not comment:
+            return FakeResponse(422, {"detail": "A comment is required to reject or request changes."})
+        prior = next((d for d in a["decisions"] if d["idempotency_key"] == body["idempotency_key"]), None)
+        if prior is not None:
+            same = (prior["action"] == body["action"] and prior["comment"] == comment
+                    and prior["request_version"] == body["request_version"]
+                    and prior["workflow_snapshot_hash"] == body["workflow_snapshot_hash"]
+                    and prior["actor_id"] == user["username"])
+            if not same:
+                return FakeResponse(409, {"detail": "Idempotency key was already used with a different request."})
+            return FakeResponse(200, {"approval": self.approval_view(a, user), "replayed": True,
+                                      "reconciliation_required": a["reconciliation_required"],
+                                      "message": "Decision already recorded."})
+        if a["status"] != "pending":
+            return FakeResponse(409, {"detail": "This approval has already been decided or the request has changed."})
+        if (body["request_version"] != a["request_version"]
+                or body["workflow_snapshot_hash"] != a["workflow_snapshot_hash"]):
+            return FakeResponse(409, {"detail": "The request has changed; reload and review the latest version."})
+        decided_at = "2026-10-17T05:30:00+00:00"
+        a["decisions"].append({"decision_id": f"DEC-{len(a['decisions']) + 1:012x}", "action": body["action"],
+                               "actor_id": user["username"], "actor_role": user["role"], "comment": comment,
+                               "decided_at": decided_at, "idempotency_key": body["idempotency_key"],
+                               "request_version": body["request_version"],
+                               "workflow_snapshot_hash": body["workflow_snapshot_hash"]})
+        a["status"] = {"approve": "approved", "reject": "rejected", "request_changes": "changes_requested"}[
+            body["action"]]
+        a["decided_at"] = decided_at
+        a["reconciliation_required"] = self.reconcile_on_decide
+        self.tickets[a["ticket_id"]]["status"] = a["status"]
+        if fault == "commit_503":
+            return FakeResponse(503, {"detail": "Database unavailable. Please try again later."})
+        return FakeResponse(200, {"approval": self.approval_view(a, user), "replayed": False,
+                                  "reconciliation_required": a["reconciliation_required"],
+                                  "message": "Decision recorded."})
+
     def list_item(self, t, admin):
         sub = t.get("submission") or {}
         item = {"ticket_id": t["ticket_id"], "title": sub.get("title"), "event_category": sub.get("event_category"),
@@ -122,6 +280,9 @@ class FakeBackend:
         outcomes = {"submitted": "Waiting for an operations admin to review your request.",
                     "needs_info": "We need more information before we can continue.",
                     "reviewed": "Your request has been reviewed and awaits a decision.",
+                    "pending_approval": "Waiting for approval by an approver.",
+                    "changes_requested": "Changes requested — please update your request.",
+                    "approval_expired": "Approval request expired — an admin will re-run it.",
                     "approved": "Approved — the draft PO was approved. No purchase has been made.",
                     "rejected": "Your request was rejected."}
         return {"ticket_id": t["ticket_id"], "status": t["status"], "submission": t["submission"],
@@ -130,12 +291,15 @@ class FakeBackend:
                 "po_summary": ({"po_id": po["po_id"], "vendor_name": po["vendor_name"], "total": po["total"],
                                 "currency": "INR", "status": "draft", "approval_status": None} if po else None),
                 "notes": t["notes"], "decision": t["decision"], "created_at": t["created_at"],
-                "updated_at": t["updated_at"]}
+                "updated_at": t["updated_at"],
+                "approval": self.ticket_approval_view(t["ticket_id"], self.users[t["owner_username"]])}
 
     def admin_view(self, t):
-        return {k: t.get(k) for k in ("ticket_id", "status", "owner_username", "owner_name", "owner_email",
+        view = {k: t.get(k) for k in ("ticket_id", "status", "owner_username", "owner_name", "owner_email",
                                       "submission", "raw_text", "workflow_result", "notes", "decision",
                                       "run_count", "last_run_by", "error", "created_at", "updated_at")}
+        view["approval"] = self.ticket_approval_view(t["ticket_id"], self.users["admin"])
+        return view
 
     # ---- transport
     def get(self, url, params=None, headers=None, timeout=None, **kw):
@@ -192,11 +356,18 @@ class FakeBackend:
                 t["notes"].append({"author": user["username"], "role": user["role"], "text": body["text"],
                                    "created_at": NOW})
             elif method == "PUT":
-                if t["status"] not in ("submitted", "needs_info"):
+                if t["status"] not in ("submitted", "needs_info", "changes_requested", "approval_expired"):
                     return FakeResponse(409, {"detail": "Ticket can no longer be edited."})
                 t["submission"] = body
                 t["status"] = "submitted"
+                for a in self.approvals.values():
+                    if a["ticket_id"] == tid and a["status"] == "pending":
+                        a["status"] = "superseded"
             return FakeResponse(200, self.user_view(t))
+
+        resp = self._approvals_api(method, path, params, body, user)
+        if resp is not None:
+            return resp
 
         m = re.match(r"^/api/admin/tickets(?:/([^/]+))?(/run|/decision|/notes|/audit)?$", path)
         if m:
@@ -214,17 +385,23 @@ class FakeBackend:
             if not t:
                 return FakeResponse(404, {"detail": f"Ticket {tid} not found."})
             if action == "/run":
-                if t["status"] in ("approved", "rejected", "processing"):
+                if t["status"] in ("approved", "rejected", "processing", "changes_requested"):
                     return FakeResponse(409, {"detail": f"Ticket is {t['status']}; cannot run."})
                 wr = workflow_result(self.run_sample, tid, body.get("invoice_id"))
                 t.update(workflow_result=wr, run_count=t["run_count"] + 1, last_run_by=user["username"],
                          status="needs_info" if wr["final_status"] == "needs_clarification" else "reviewed")
+                po = (wr.get("procurement") or {}).get("po")
+                if wr["final_status"] in ("pass", "warning") and po:
+                    self.add_approval(tid, amount=float(po["total"]))
             elif action == "/decision":
+                if body["decision"] == "approve":
+                    return FakeResponse(403, {"detail": "Approvals must be decided by an eligible approver via "
+                                                        "/api/approvals."})
                 if t["status"] != "reviewed":
                     return FakeResponse(409, {"detail": "Ticket is not awaiting a decision."})
                 t["decision"] = {"decision": body["decision"], "by": user["username"], "at": NOW,
                                  "note": body.get("note")}
-                t["status"] = "approved" if body["decision"] == "approve" else "rejected"
+                t["status"] = "rejected"
             elif action == "/notes":
                 t["notes"].append({"author": user["username"], "role": "admin", "text": body["text"],
                                    "created_at": NOW})
@@ -433,7 +610,7 @@ def test_user_detail_shows_outcome_without_internals(backend):
     assert at.selectbox(key="my_selected_ticket").value == tid
     body = texts(at)
     assert "awaits a decision" in body
-    assert "Draft — no purchase made" in body
+    assert "Draft — no order placed, nothing paid" in body
     assert "₹" in " ".join(str(m.value) for m in at.metric)
     for internal in ("Policy checks", "Critic findings", "Audit trail", "Vendor Matcher", "Billing Guardian"):
         assert internal not in body
@@ -486,14 +663,19 @@ def test_admin_queue_counts_and_filter(backend):
     assert len(at.dataframe[0].value) == 1
 
 
-def test_admin_run_and_approve(backend):
+def _button_keys(at: AppTest) -> set:
+    return {b.key for b in at.button}
+
+
+def test_admin_run_creates_pending_approval_without_admin_approve(backend):
     tid = backend.add_ticket()
     at = logged_in(backend, "admin")
     at.selectbox(key="admin_pick").select(tid)
     at.run()
     assert not at.exception
     assert button(at, "admin_run_btn").label == "▶️ Run workflow"
-    assert button(at, "admin_approve_btn").disabled and button(at, "admin_reject_btn").disabled
+    # Approval moved to approvers: no approve control at all; reject only for `reviewed` tickets.
+    assert "admin_approve_btn" not in _button_keys(at) and "admin_reject_btn" not in _button_keys(at)
     at.selectbox(key="admin_invoice").select("INV-5001")
     click(at, "admin_run_btn")
     sent = backend.find("POST", f"/api/admin/tickets/{tid}/run")[-1][2]
@@ -502,20 +684,18 @@ def test_admin_run_and_approve(backend):
     for lbl in ("1. Request", "2. Policy", "3. Vendors", "4. Draft PO", "5. Invoice check", "6. Critic & Audit"):
         assert lbl in labels
     assert button(at, "admin_run_btn").label == "🔁 Re-run workflow"
-    assert not button(at, "admin_approve_btn").disabled
-    assert "Stored result is persisted" in texts(at)
+    assert backend.tickets[tid]["status"] == "pending_approval"
+    assert "admin_approve_btn" not in _button_keys(at) and "admin_reject_btn" not in _button_keys(at)
+    body = texts(at)
+    assert "Stored result is persisted" in body
+    assert "pending approval" in body and "PO_REQUIRES_HUMAN_APPROVAL" in body
+    assert SAFETY in body
+    assert "Draft — no order placed, nothing paid" in body
 
     click(at, "admin_audit_btn")
     assert backend.find("GET", f"/api/admin/tickets/{tid}/audit")
     assert "Saved audit history" in texts(at)
-
-    at.text_area(key="admin_decision_note").input("Looks good")
-    click(at, "admin_approve_btn")
-    dec = backend.find("POST", f"/api/admin/tickets/{tid}/decision")[-1][2]
-    assert dec == {"decision": "approve", "note": "Looks good"}
-    assert backend.tickets[tid]["status"] == "approved"
-    assert button(at, "admin_run_btn").disabled
-    assert button(at, "admin_approve_btn").disabled
+    assert not backend.find("POST", f"/api/admin/tickets/{tid}/decision")
 
 
 def test_admin_approve_disabled_for_blocked(backend):
@@ -529,7 +709,8 @@ def test_admin_approve_disabled_for_blocked(backend):
     wr = backend.tickets[tid]["workflow_result"]
     assert wr["final_status"] == "blocked"
     assert backend.tickets[tid]["status"] == "reviewed"
-    assert button(at, "admin_approve_btn").disabled
+    assert not backend.approvals  # hard block: no approval request, cannot be approved
+    assert "admin_approve_btn" not in _button_keys(at)
     assert not button(at, "admin_reject_btn").disabled
     click(at, "admin_reject_btn")
     assert backend.find("POST", f"/api/admin/tickets/{tid}/decision")[-1][2] == {"decision": "reject", "note": None}

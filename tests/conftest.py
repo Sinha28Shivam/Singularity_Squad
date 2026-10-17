@@ -63,6 +63,32 @@ def user_headers_factory():
     return make
 
 
+APPROVER_PASSWORD = "approver-pass-123"  # test-only credential
+
+
+@pytest.fixture
+def approver_headers_factory(monkeypatch):
+    """Callable(username="carol") -> bearer headers for a server-seeded approver (APPROVER_ACCOUNTS).
+
+    Every call re-seeds all approvers requested so far, like the app does at startup."""
+    from app.auth.service import seed_approvers_from_env
+
+    c = _auth_client()
+    names: list[str] = []
+
+    def make(username: str = "carol") -> dict:
+        if username not in names:
+            names.append(username)
+        monkeypatch.setenv("APPROVER_ACCOUNTS", ",".join(f"{n}:{APPROVER_PASSWORD}" for n in names))
+        assert seed_approvers_from_env() == len(names)
+        r = c.post("/api/auth/login", json={"username": username, "password": APPROVER_PASSWORD})
+        assert r.status_code == 200, r.text
+        assert r.json()["user"]["role"] == "approver"
+        return {"Authorization": f"Bearer {r.json()['token']}"}
+
+    return make
+
+
 @pytest.fixture
 def client():
     """TestClient with app lifespan (startup indexes / admin seeding). Modules may override it."""

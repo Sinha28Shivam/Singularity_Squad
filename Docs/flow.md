@@ -7,7 +7,8 @@ This document covers:
 - How functions call each other during a workflow run.
 - How data moves between agents.
 - How each run is saved to MongoDB (Phase 1).
-- The role-based portal: users submit tickets and the admin runs the workflow and decides (section 10).
+- The role-based portal: users submit tickets and the admin runs the workflow (section 10).
+- Phase 2 approval safety: approvers decide versioned approval requests, with separation of duties (section 11).
 
 All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or payment. Saving a draft PO to the database does **not** approve or issue it.
 
@@ -28,6 +29,7 @@ python -m pip install -r requirements.txt
 #    ADMIN_USERNAME=admin                    admin account, created/updated at API startup
 #    ADMIN_PASSWORD=<strong password>        (no admin account exists if unset; there is no default password)
 #    SESSION_TTL_HOURS=8                     login session lifetime
+#    APPROVER_ACCOUNTS=approver:<password>   Phase 2 approver accounts (comma-separated user:pass; demo auth only)
 
 # 3. Make sure MongoDB is running (Windows service "MongoDB", or Atlas)
 mongosh --eval "db.adminCommand('ping')"
@@ -56,9 +58,9 @@ git diff --check
 
 1. **User:** click **Create account**, then in **My requests → New request** fill in e.g. "Quarterly team lunch", Team lunch, Lunch, 2026-10-23, 100 attendees, ₹1,00,000, Bengaluru. Submit; the ticket shows as `submitted`.
 2. **Admin:** log in with `ADMIN_USERNAME` / `ADMIN_PASSWORD`. The ticket appears in the **Admin console** queue.
-3. Open the ticket, keep the demo date `2026-10-17`, pick an invoice (INV-5001 match, INV-5002 mismatch, INV-4987 duplicate), and click **Run workflow**. The six result tabs appear and the ticket becomes `reviewed`.
-4. **Approve** (or **Reject**) with a note.
-5. **User:** refresh **My requests**. The ticket shows "Approved — draft PO … for ₹76,125 recorded. No purchase has been made yet." with the admin's note.
+3. Open the ticket, keep the demo date `2026-10-17`, pick an invoice (INV-5001 match, INV-5002 mismatch, INV-4987 duplicate), and click **Run workflow**. The six result tabs appear. The ticket becomes `pending_approval`, with an approval request (reasons `PO_REQUIRES_HUMAN_APPROVAL` and `AMOUNT_THRESHOLD`).
+4. **Approver:** log in with an `APPROVER_ACCOUNTS` user, open **Approvals**, pick the request, choose Approve / Reject / Request changes, then tick **Confirm**. Admins cannot approve, and nobody can approve their own request.
+5. **User:** refresh **My requests**. The ticket shows "Approved — draft PO … for ₹76,125 recorded. No purchase has been made yet." plus the approval panel and its history.
 
 To call the API directly, log in first; every ticket endpoint needs a bearer token:
 
@@ -131,7 +133,8 @@ AI_Hackathon_2.0/
 │   └── pages_portal/
 │       ├── login.py             # Log in / Create account
 │       ├── user_portal.py       # New request form, My requests, outcome, notes, edit & resubmit
-│       └── admin_console.py     # Queue + counts, ticket detail, run/re-run, approve/reject, notes, tabs
+│       ├── admin_console.py     # Queue + counts, ticket detail, run/re-run, reject (reviewed only), notes, reconcile
+│       └── approvals.py         # Approver queue + detail, 2-step confirm, idempotent decisions (Phase 2)
 └── tests/
     ├── conftest.py              # sys.path, offline LLM, fresh mongomock client per test
     ├── test_intake.py, test_policy.py, test_vendor_procurement.py, test_billing.py, test_workflow.py
@@ -140,8 +143,12 @@ AI_Hackathon_2.0/
     ├── test_persistence_failures.py # failure at each write stage, retry idempotency, no secret leaks
     ├── test_ui_tickets.py       # AppTest: admin console shows the stored persisted flag, 404/503
     ├── test_auth.py             # signup/login/logout, hashing, token expiry, admin seeding, 401/403
-    ├── test_ticket_lifecycle.py # submit -> run -> approve/reject, re-run, needs_info, ownership, views
-    ├── test_ui_portal.py        # AppTest: login, user submit/edit, admin run/approve, 401 handling
+    ├── test_ticket_lifecycle.py # submit -> run -> pending_approval, re-run, needs_info, ownership, views
+    ├── test_approval_policy.py, test_approval_service.py, test_approval_concurrency.py  # Phase 2 core
+    ├── test_approval_api.py     # Phase 2 authz matrix + HTTP lifecycle
+    ├── test_approval_acceptance.py, test_approval_persistence.py  # real MongoDB + uvicorn (spec §18)
+    ├── test_ui_approvals.py     # AppTest: approver page, confirmation, 409/503 handling
+    ├── test_ui_portal.py        # AppTest: login, user submit/edit, admin run, no admin approve, 401 handling
     ├── test_mongo_integration.py# real local MongoDB: indexes + duplicate-key behaviour
     └── test_persistence_restart.py # real MongoDB + 2 real uvicorn processes: survives API restart
 ```
@@ -410,7 +417,7 @@ flowchart LR
 | Collection | One document per | Key fields | Indexes |
 |---|---|---|---|
 | `tickets` | ticket | `ticket_id`, `status` (portal lifecycle: submitted / processing / reviewed / needs_info / approved / rejected / failed / persistence_error; legacy runs store the final status), `owner_username`, `owner_name`, `owner_email`, `submission`, `raw_text`, `workflow_result`, `notes[]`, `decision`, `run_count`, `last_run_by`, `last_run_at`, `error`, `created_at`, `updated_at`, `schema_version` | unique `ticket_id`; `updated_at` desc; `(owner_username, updated_at)`; `(status, updated_at)` |
-| `purchase_orders` | draft PO | all `DraftPO` fields + `ticket_id`, `created_at`, `updated_at`, `schema_version`. `status` is always `draft`; `approval_status` (approved / rejected), `approved_by` and `approved_at` record the admin decision. | unique `po_id`; `ticket_id` |
+| `purchase_orders` | draft PO | all `DraftPO` fields + `ticket_id`, `created_at`, `updated_at`, `schema_version`. `status` is always `draft`; `approval_status` (approved / rejected), `approved_by` and `approved_at` record the approver's decision (Phase 2). | unique `po_id`; `ticket_id` |
 | `agent_logs` | audit event | `ticket_id`, `sequence`, `agent` (agents, plus `User` / `Admin` for portal actions), `action`, `status`, `detail`, `evidence[]`, `llm_used`, `timestamp`, `schema_version` | unique `(ticket_id, sequence)`; `(ticket_id, timestamp)` |
 | `users` | account | `username` (lowercase), `email` (lowercase), `name`, `role` (user / admin), `password_hash`, `salt`, `created_at`, `updated_at`, `schema_version` | unique `username`; unique `email` |
 | `sessions` | login session | `token_hash` (SHA-256 of the token; the token itself is never stored), `username`, `role`, `created_at`, `expires_at` | unique `token_hash`; TTL on `expires_at` (expiry is also checked in code) |
@@ -454,7 +461,7 @@ Auth: send `Authorization: Bearer <token>` (from login or signup).
 | GET | `/api/admin/tickets?status=&limit=100` | `list_tickets()`, `count_tickets_by_status()` | `{tickets: [TicketListItem], counts: {status: n}}` |
 | GET | `/api/admin/tickets/{id}` | `to_admin_view()` | `AdminTicketView`: requester, submission, raw text, full `workflow_result`, notes, decision, run info |
 | POST | `/api/admin/tickets/{id}/run` | `ticket_service.run_ticket()` | `AdminTicketView`; `409` if approved, rejected or already processing; `503` on DB failure |
-| POST | `/api/admin/tickets/{id}/decision` | `ticket_service.decide_ticket()` | `AdminTicketView`; `409` if not `reviewed`, or for an approve with no draft PO or an outcome other than pass or warning |
+| POST | `/api/admin/tickets/{id}/decision` | `ticket_service.decide_ticket()` | **Reject only**, for `reviewed` tickets (blocked or no PO). `approve` gives `403` (approvals go through `/api/approvals`). Rejecting a `pending_approval` ticket gives `409`. |
 | POST | `/api/admin/tickets/{id}/notes` | `add_note()` | `AdminTicketView` |
 | GET | `/api/admin/tickets/{id}/audit?limit=500` | `get_audit_entries()` | `{ticket_id, events}` sorted by `sequence` |
 | POST | `/api/workflow` | `ticket_service.run_and_persist()` | Legacy one-shot create and run: `WorkflowResult` with `ticket_id`, `persisted` |
@@ -513,7 +520,7 @@ flowchart LR
         Q --> AD[Ticket detail<br/>GET /api/admin/tickets/id]
         AD --> RUN[Run / Re-run: demo date + invoice<br/>POST .../run]
         RUN --> TABS[Pipeline + 6 result tabs<br/>lib/render.py]
-        AD --> DEC[Approve / Reject + note<br/>POST .../decision]
+        AD --> DEC[Reject reviewed ticket + note<br/>POST .../decision]
         AD --> ANOTE[Add note<br/>POST .../notes]
         TABS --> AUD[Load saved audit<br/>GET .../audit]
     end
@@ -522,7 +529,7 @@ flowchart LR
 **UI behaviour:**
 
 - The sidebar shows API, LLM and DB health, "Signed in as <name> (<role>)", and **Logout**. A disclaimer banner appears on every page.
-- **Approve** is enabled only when the status is `reviewed`, a draft PO exists and the outcome is pass or warning. **Reject** is enabled when the status is `reviewed`. **Run** is disabled when the ticket is approved, rejected or processing. The backend enforces the same rules and returns `409`.
+- The admin console has **no Approve button** (Phase 2): approvals belong to approvers. **Reject** appears only for `reviewed` tickets. **Run** is disabled when the ticket is approved, rejected or processing. The backend enforces the same rules (`403` / `409`).
 - The admin ticket banner shows the stored `workflow_result.persisted` flag as saved, plus the run count and who ran it last.
 - Error messages:
   - `401` → "Session expired — please log in again." The user is logged out.
@@ -580,7 +587,9 @@ flowchart LR
 
 ---
 
-## 10. Role-based portal: users submit, the admin runs and decides
+## 10. Role-based portal: users submit, the admin runs the workflow
+
+> Phase 2 changed who approves: the admin no longer approves. A pass or warning run now creates an approval request that an **approver** decides; see section 11. Sections 10.1 and 10.3 below show the original Phase 1.5 flow; 11.2 has the current ticket lifecycle.
 
 ### 10.1 Ticket lifecycle (`tickets.status`)
 
@@ -716,3 +725,151 @@ The agents are unchanged. `build_request_text()` turns the structured form into 
   - Editing a ticket while `reviewed` gave `409`; editing a `submitted` one gave `200`. After logout, the old token got `401`.
 - **Real Streamlit pages against the live API:** a new user signed up and submitted through the form; the admin logged in, saw the status counts, loaded and ran the ticket (6 tabs) and approved it, after which Run was disabled. The user then saw the decision and note with no internals, and no page raised an exception.
 - `streamlit run ui\streamlit_app.py` (the shim) serves the app; the health check returned `ok`.
+
+---
+
+## 11. Phase 2: approval safety (spec `Docs/PHASE_2_APPROVAL_SAFETY.md`)
+
+**Boundary:** approval records an internal human authorization only. No code path places an order, sends a PO, approves an invoice for payment or moves money. The PO `status` is always `draft`; only `approval_status` changes. The approval code never imports billing or procurement.
+
+### 11.1 Roles and who may decide
+
+| Role | How the account exists | Can decide approvals? |
+|---|---|---|
+| `user` (requester) | Self sign-up | No |
+| `approver` | Server-configured via `APPROVER_ACCOUNTS` in `.env`; cannot be self-registered or escalated | **Yes**, except on their own requests |
+| `admin` | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | **No.** Runs workflows, sees the queue read-only, rejects `reviewed` tickets, reconciles |
+
+- Roles come from the user record behind the session token, never from the request body or headers.
+- `DecisionIn` uses `extra="forbid"`, so a body carrying `actor_id`, `role` or `status` gets `422`.
+- This is demo-grade authentication, not production identity.
+
+### 11.2 Ticket lifecycle with approvals
+
+```mermaid
+stateDiagram-v2
+    [*] --> submitted: User submits
+    submitted --> processing: Admin runs
+    processing --> needs_info: needs_clarification
+    processing --> reviewed: blocked / no draft PO (hard block - no approval request)
+    processing --> pending_approval: draft PO + pass/warning<br/>approval request vN created
+    pending_approval --> approved: Approver approves vN
+    pending_approval --> rejected: Approver rejects vN (comment required)
+    pending_approval --> changes_requested: Approver requests changes (comment required)
+    pending_approval --> approval_expired: expires_at passed (server clock, never auto-approve)
+    pending_approval --> processing: Admin re-runs (vN superseded)
+    changes_requested --> submitted: User edits and resubmits
+    approval_expired --> processing: Admin re-runs (new version)
+    needs_info --> submitted: User edits and resubmits
+    reviewed --> rejected: Admin rejects (blocked ticket)
+    approved --> [*]
+    rejected --> [*]
+```
+
+**Lifecycle rules:**
+
+- **Approval states:** `pending` → `approved` / `rejected` / `changes_requested` / `expired` / `superseded`. Every non-pending state is terminal for that version.
+- **New versions, never edits:** a new run or a resubmission creates a new version. Old versions stay in history.
+- **`final_status` is never touched:** the workflow's verdict stays as computed.
+- **No approval after a hard block:** `on_workflow_completed` creates no request, and a decision on a stored snapshot whose final status isn't pass or warning gives `409`.
+
+### 11.3 Deterministic approval policy (`app/approvals/policy.py`, `data/approval_policy.json`)
+
+`evaluate_approval_requirement(workflow_result)` uses only structured fields: `final_status`, the PO total, check statuses, attendee checks and critic finding statuses. It never reads LLM summaries.
+
+| Condition | Result |
+|---|---|
+| `needs_clarification` | No request; the ticket goes to `needs_info` |
+| `blocked`, or no draft PO | No request; hard block, ticket `reviewed` |
+| Draft PO (pass/warning) | **Required**: `PO_REQUIRES_HUMAN_APPROVAL` (PROC-4.1: every system PO needs sign-off) |
+| PO total > ₹50,000 | + `AMOUNT_THRESHOLD` (risk medium) |
+| PO total > ₹1,50,000 | + `HIGH_VALUE` (risk high) |
+| `final_status == warning` | + `POLICY_WARNING` (risk medium) |
+| Attendee-limit check warns | + `LARGE_EVENT` (risk medium) |
+
+- `policy_version: approval-policy-v1` and `required_role: approver`; requests expire after `expiry_hours: 72`.
+- If evaluation raises, the run fails closed: `503`, no approval request is created, and the ticket is never shown as approved.
+
+**Snapshot hash:** `review_snapshot()` takes the canonical review fields (ticket id, run count, submission, extracted request, PO lines and totals, final status, reconciliation status). `snapshot_hash()` is the SHA-256 of their sorted-key JSON. A decision must send the same `request_version` and `workflow_snapshot_hash`, so reviewers approve exactly what they saw. The hash detects change; it is not authorization.
+
+### 11.4 Deciding: atomic, idempotent, separated
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor P as Approver
+    participant UI as pages_portal/approvals.py
+    participant API as routers/approvals.py
+    participant S as approvals/service.decide()
+    participant R as approval_repository
+    participant DB as MongoDB
+
+    P->>UI: pick action + comment, "Continue to confirmation", tick Confirm
+    UI->>UI: idempotency_key generated once and reused on retry
+    UI->>API: POST /api/approvals/{id}/decision {action, comment, idempotency_key, request_version, workflow_snapshot_hash}
+    API->>S: decide(approval_id, actor from token, body)
+    S->>R: get_approval (404 if missing or not visible)
+    S->>S: lazy expiry (expired gives 409)
+    S->>S: role == approver? (403) / actor != requester? (403) / comment rule (422)
+    S->>R: find_decision_by_key: same payload gives a replay (200, replayed=true), different payload 409
+    S->>R: decide_atomic: find_one_and_update {status: pending, request_version, hash, expires_at > now} + $push decision
+    alt matched (the single winner)
+        R->>DB: approval doc becomes approved / rejected / changes_requested
+        S->>DB: ticket status (expected pending_approval), PO approval_status, ticket note, audit
+        Note over S,DB: If a secondary write fails, reconciliation_required=true and the response is still the truthful 200. Admin can POST /api/admin/approvals/{id}/reconcile.
+        API-->>UI: 200 {approval, replayed:false, reconciliation_required, message}
+    else no match
+        S->>S: classify: terminal / stale version or hash / expired
+        API-->>UI: 409 safe message (UI warns and reloads)
+    end
+```
+
+- **One winner under concurrency:** two approvers racing on one request produce exactly one decision; the other gets `409`. This was tested with threads on mongomock and real MongoDB, and with 6 parallel HTTP requests against real uvicorn.
+- **Denied attempts are audited:** `approval_denied` records a safe category only (self_approval, wrong_role, stale, terminal, expired). Logging is best-effort and can never turn a denial into an allow.
+- **Audit events:** `approval_requested`, `approval_superseded`, `approval_approved`, `approval_rejected`, `approval_changes_requested`, `approval_expired`, `approval_denied` and `approval_reconciliation_required`. Appends retry on a sequence collision, so the audit stays contiguous.
+
+### 11.5 Phase 2 API
+
+| Method | Path | Who | Notes |
+|---|---|---|---|
+| GET | `/api/approvals?status=&limit=` | approver, admin (user `403`) | `{approvals: [ApprovalListItem], counts}`; a short summary, never the request text |
+| GET | `/api/approvals/{approval_id}` | approver/admin any; requester own only (else `404`) | `ApprovalView` with `can_decide` / `cannot_decide_reason` and the safety notice |
+| POST | `/api/approvals/{approval_id}/decision` | authenticated; the service enforces the role | `{approval, replayed, reconciliation_required, message}`; errors `401` / `403` / `404` / `409` / `422` / `503` |
+| GET | `/api/tickets/{ticket_id}/approval` | owner, approver, admin | `TicketApprovalView` (current + history). The requester copy has no snapshot, hash or idempotency keys. |
+| POST | `/api/admin/approvals/{approval_id}/reconcile` | admin | re-applies secondary updates idempotently |
+
+**Collection `approval_requests`**
+
+- Fields: `approval_id`, `ticket_id`, `request_version`, `ticket_version`, `status`, `requester_id`, `required_role`, `reason_codes`, `reasons`, `risk_level`, `amount`, `currency`, `policy_version`, `workflow_snapshot_hash`, `review_snapshot`, `created_at`, `expires_at`, `decided_at`, `decisions[]` (append-only `DecisionRecord`), `reconciliation_required`, `schema_version`.
+- Indexes: `approval_id_unique`, `ticket_version_unique`, `status_created`, `requester_created`, and `one_pending_per_ticket` (partial unique on `ticket_id` where status is pending).
+
+### 11.6 What changed for existing clients
+
+1. **Admins can no longer approve.** `POST /api/admin/tickets/{id}/decision` with `approve` returns `403`. Admin reject works only on `reviewed` tickets, and returns `409` on `pending_approval` ones.
+2. **Successful runs end in `pending_approval`**, not `reviewed`. `reviewed` now means blocked or no PO.
+3. **New roles, statuses and fields:** role `approver`; statuses `pending_approval`, `changes_requested` and `approval_expired`; an `approval` field in both ticket views; new outcome texts such as "Waiting for approval by an approver." and "Rejected by an approver. Note: …".
+4. **Re-runs:** a `pending_approval` ticket can be re-run (the pending version is superseded). Approved or rejected tickets still give `409`.
+5. **UI:** the admin console's Approve button is gone. Approvers get a new **Approvals** page; admins get the same page read-only.
+6. **Unchanged:** the agents, workflow, persistence order, legacy admin endpoints, user ticket endpoints and auth endpoints.
+
+### 11.7 Phase 2 verification record (2026-10-17)
+
+- `python -m pytest -q`: **257 passed**. That covers 39 policy, service and concurrency tests, 21 API tests, 8 real-MongoDB acceptance and persistence tests with real uvicorn, 20 approval UI tests, and every earlier test.
+- **Live run** (LLM enabled, `.env` admin and approver accounts, throwaway database):
+  - A happy-path run ended in `pending_approval` with v1 (`PO_REQUIRES_HUMAN_APPROVAL`, `AMOUNT_THRESHOLD`, medium, ₹76,125, approval-policy-v1).
+  - Requester decision `403`; admin decision `403`; legacy admin approve `403`; smuggled `actor_id` `422`; stale hash `409`; reject without a comment `422`.
+  - The approver's approve returned `200` with the message "…no order or payment was executed". A replay with the same key returned `replayed=true`; the same key with another payload `409`; a new key `409`.
+  - The user saw "Approved…" with the PO `draft` and approval `approved`. No ordered or paid claims and no hash or keys appeared in the user view, and the audit was contiguous.
+- **After an API restart:** the approval was still `approved` with one decision by `approver` (approver), and the ticket was `approved`.
+- **Other paths:**
+  - Reject: the user saw "Rejected by an approver. Note: …".
+  - Request changes, then user edit and admin re-run: v2 pending and v1 changes_requested; approving the stale v1 gave `409` and v2 was approved.
+  - Re-run while pending: v1 superseded, and approving the old version gave `409`.
+  - Hard block (120 attendees on ₹60,000): no approval request, admin reject worked.
+  - A ₹29,400 ticket: still requires sign-off, risk low.
+  - Forced expiry: approve gave `409 "Approval request has expired."`, the ticket became `approval_expired`, and an admin re-run produced v2 pending.
+- **Database:** every PO `status` is `draft`; all 5 approval indexes exist.
+- **Real Streamlit pages against the live API:**
+  - Approver: the queue showed counts by status, the detail showed the safety notice and the "Draft — no order placed, nothing paid" label, and history read "Approved by `approver` (approver) at … — 'Within policy.'".
+  - "Continue to confirmation" sent nothing; Confirm stayed disabled until the checkbox was ticked; after confirming, the server status was `approved`.
+  - The admin console had no Approve button and the user portal had no decision controls, with no exceptions on any page.
