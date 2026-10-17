@@ -414,6 +414,76 @@ def validate_quote(quote: RateQuote, *, entries: Optional[list[dict]] = None,
         validation_status=status, reason=reason)
 
 
+def vendor_has_rate_card(vendor_key: Optional[str]) -> bool:
+    """True when a current (ready) rate-card document has non-rejected rows for this exact vendor key."""
+    if not vendor_key:
+        return False
+    from app.repositories import rate_card_repository as repo
+
+    rows = [e for e in repo.list_entries(vendor_key=vendor_key, limit=2000)
+            if e.get("verification_status") != "rejected"]
+    return bool(_ready_document_versions({e.get("document_id") for e in rows}))
+
+
+REQUIRED_LINE_FIELDS = ("description", "unit_price", "quantity", "unit", "currency", "as_of")
+
+
+def quote_from_po_line(line: Any, *, vendor_key: str, currency: Optional[str],
+                       as_of: Optional[dt.date]) -> tuple[Optional[RateQuote], list[str]]:
+    """Build a RateQuote from one structured draft-PO line. Never guesses: returns (None, missing_fields)
+    when a required field is absent or invalid (e.g. no unit, non-integer quantity)."""
+    missing: list[str] = []
+    description = _field(line, "description")
+    code = slug(description) if isinstance(description, str) and description.strip() else None
+    if code is None:
+        missing.append("description")
+    price = _field(line, "unit_price")
+    quoted = None
+    if price is None or isinstance(price, bool):
+        missing.append("unit_price")
+    else:
+        try:
+            quoted = Decimal(repr(price)) if isinstance(price, float) else Decimal(str(price))
+            if not quoted.is_finite() or quoted < 0:
+                raise InvalidOperation
+        except (InvalidOperation, ValueError):
+            missing.append("unit_price")
+            quoted = None
+    qty = _field(line, "quantity")
+    quantity = None
+    try:
+        if qty is not None and not isinstance(qty, bool):
+            dq = Decimal(repr(qty)) if isinstance(qty, float) else Decimal(str(qty))
+            if dq == dq.to_integral_value() and dq >= 1:
+                quantity = int(dq)
+    except (InvalidOperation, ValueError):
+        quantity = None
+    if quantity is None:
+        missing.append("quantity")
+    unit = _field(line, "unit")
+    if not isinstance(unit, str) or not unit.strip():
+        missing.append("unit")
+    cur = _field(line, "currency") or currency
+    if not isinstance(cur, str) or not re.fullmatch(r"[A-Z]{3}", cur.strip().upper()):
+        missing.append("currency")
+    if as_of is None:
+        missing.append("as_of")
+    if missing:
+        return None, missing
+    return RateQuote(vendor_key=vendor_key, item_or_service_code=code, quoted_unit_rate=_fmt(quoted),
+                     quantity=quantity, currency=cur.strip().upper(), unit=unit.strip(), as_of=as_of), []
+
+
+def missing_fields_result(line: Any, index: int, vendor_key: str, missing: list[str]) -> RateValidationResult:
+    """Explicit non-pass result for a PO line that cannot be validated (missing fields listed)."""
+    return RateValidationResult(
+        quoted_unit_rate="0.00", currency=str(_field(line, "currency") or "INR"),
+        quantity=1, quoted_total="0.00", validation_status="unknown",
+        reason="The PO line lacks fields required for rate-card validation: " + ", ".join(missing) + ".",
+        line_index=index, line_description=(str(_field(line, "description") or "")[:200] or None),
+        vendor_key=vendor_key, missing_fields=list(missing))
+
+
 def overlapping_verified_conflicts(vendor_key: str, as_of: dt.date, *,
                                    entries: Optional[list[dict]] = None,
                                    documents: Optional[dict[str, dict]] = None) -> list[dict]:

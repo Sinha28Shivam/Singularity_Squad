@@ -18,6 +18,7 @@ from ui.lib.api import (
     ApiError, api_get, api_post, approval_badge, current_user, friendly_error,
 )
 from ui.lib.policy_render import embedded_or_fetch, render_policy_evidence
+from ui.lib.rule_render import STALE_POLICY
 from ui.lib.approval_render import (
     decision_line, fmt_amount, fmt_ts, render_decisions, render_reasons, render_snapshot, render_summary,
     safety_notice,
@@ -183,11 +184,20 @@ def policy_evidence_section(view: dict) -> None:
     snap = view.get("review_snapshot") if isinstance(view.get("review_snapshot"), dict) else {}
     bound = snap.get("policy_evaluation") if isinstance(snap.get("policy_evaluation"), dict) else None
     evaluation, err = embedded_or_fetch(view, "policy_evaluation")
+    stale = bool(view.get("stale_policy") or (evaluation or {}).get("stale_policy"))
     if err:
         st.subheader("📑 Policy evidence")
         st.warning(f"Policy evidence unavailable: {err}")
+        if stale:
+            st.warning(STALE_POLICY)
         return
-    render_policy_evidence(evaluation)
+    if stale:
+        st.warning(STALE_POLICY)
+    render_policy_evidence(evaluation, stale_policy=False)
+    if snap.get("policy_set_version") is not None:
+        eh = str(snap.get("engine_hash") or "")
+        st.caption(f"This approval is bound to policy set v{snap['policy_set_version']}"
+                   + (f" (engine `{eh[:12]}…`)" if eh else "") + ".")
     if bound and bound.get("evaluation_hash"):
         h = str(bound["evaluation_hash"])
         st.caption(f"This approval is bound to policy evaluation `{h[:12]}…` (rule set "

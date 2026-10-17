@@ -103,3 +103,7 @@ __all__ += ["evidence_snapshot_repository", "rate_card_repository"]
 from app.repositories import policy_chunk_repository, policy_document_repository  # noqa: E402
 
 __all__ += ["policy_chunk_repository", "policy_document_repository"]
+
+from app.repositories import policy_rule_repository  # noqa: E402
+
+__all__ += ["policy_rule_repository"]

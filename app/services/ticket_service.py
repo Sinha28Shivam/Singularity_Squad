@@ -605,6 +605,31 @@ def _latest_policy_evaluation(doc: dict) -> Optional[dict]:
     return {**snap["evaluation"], "snapshot_id": snap.get("snapshot_id")}
 
 
+def _policy_status(doc: dict) -> Optional[dict]:
+    """Server-derived requirement flags for the ticket's current run, so a ticket that needs clarification
+    AND is hard-blocked shows both. View-only: failures hide the panel (never shown as 'approvable')."""
+    wr = doc.get("workflow_result")
+    if not isinstance(wr, dict) or not wr.get("final_status"):
+        return None
+    try:
+        evaluation = approval_service._policy_evaluation_for(doc)
+        req = evaluate_approval_requirement(wr, policy_evaluation=evaluation)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Policy status unavailable for ticket %s (%s)", doc.get("ticket_id"), type(exc).__name__)
+        return None
+    engine = (evaluation or {}).get("rule_engine") if isinstance(evaluation, dict) else None
+    return {"needs_clarification": req.needs_clarification, "blocked": req.blocked, "required": req.required,
+            "reason_codes": list(req.reason_codes), "reasons": list(req.reasons), "risk_level": req.risk_level,
+            "policy_set_version": engine.get("policy_set_version") if isinstance(engine, dict) else None,
+            "rule_engine_overall": engine.get("overall") if isinstance(engine, dict) else None}
+
+
+def _requester_policy_status(status: Optional[dict]) -> Optional[dict]:
+    if not status:
+        return None
+    return {k: status.get(k) for k in ("needs_clarification", "blocked", "reasons")}
+
+
 def _owner_viewer(doc: dict) -> UserPublic:
     return UserPublic(username=doc.get("owner_username") or "", name=doc.get("owner_name") or "",
                       email=doc.get("owner_email") or "", role="user")
@@ -628,6 +653,7 @@ def to_user_view(doc: dict) -> UserTicketView:
         approval=requester_approval(approval),
         policy_evidence=(redact_policy_evaluation(ev, doc["ticket_id"])
                          if (ev := _latest_policy_evaluation(doc)) else None),
+        policy_status=_requester_policy_status(_policy_status(doc)),
         created_at=doc.get("created_at"),
         updated_at=doc.get("updated_at"),
     )
@@ -640,6 +666,7 @@ def to_admin_view(doc: dict, viewer: Optional[UserPublic] = None) -> AdminTicket
     return AdminTicketView(
         approval=_ticket_approval(doc, viewer or _SYSTEM_ADMIN_VIEWER),
         policy_evaluation=_latest_policy_evaluation(doc),
+        policy_status=_policy_status(doc),
         ticket_id=doc["ticket_id"],
         status=doc.get("status") or "unknown",
         owner_username=doc.get("owner_username"),

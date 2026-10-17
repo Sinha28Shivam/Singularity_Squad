@@ -314,6 +314,9 @@ def decide(approval_id: str, actor: UserPublic, body: DecisionIn,
     if body.action == "approve" and snap_status not in ("pass", "warning"):
         _audit_denied(doc, actor, "blocked")
         raise ApprovalError(409, E.MSG_BLOCKED)
+    if is_stale_policy(doc):
+        _audit_denied(doc, actor, "stale_policy")
+        raise ApprovalError(409, E.MSG_STALE_POLICY)
 
     new_status = ACTION_TO_STATUS[body.action]
     record = DecisionRecord(
@@ -337,6 +340,43 @@ def decide(approval_id: str, actor: UserPublic, body: DecisionIn,
         _flag_reconciliation(approval_id, after["ticket_id"])
         after["reconciliation_required"] = True
     return after, False
+
+
+def bound_policy_set_version(doc: dict) -> Optional[int]:
+    """policy_set_version the request's review snapshot was evaluated against (None = no rule engine bound)."""
+    snap = doc.get("review_snapshot") or {}
+    engine = (snap.get("policy_evaluation") or {}).get("rule_engine") or {}
+    value = engine.get("policy_set_version", snap.get("policy_set_version"))
+    return int(value) if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def is_stale_policy(doc: dict) -> bool:
+    """True when a PENDING request is bound to a policy set that is no longer active.
+
+    Raises if the registry cannot be read (callers fail closed: a decision is never committed on an
+    unverifiable policy set). Requests without a bound policy set (rule engine disabled / legacy) are never
+    stale by this check."""
+    if doc.get("status") != "pending":
+        return False
+    bound = bound_policy_set_version(doc)
+    if bound is None:
+        return False
+    from app.policy_rules.engine import active_version
+    try:
+        current = active_version()
+    except Exception as exc:  # noqa: BLE001 - surface as 503, never as "not stale"
+        logger.error("Active policy set unavailable (%s)", type(exc).__name__)
+        from app.db import PersistenceError
+        raise PersistenceError("Policy set could not be verified. Please try again later.") from None
+    return int(current) != bound
+
+
+def _stale_flag(doc: dict) -> bool:
+    """View-only variant: an unreadable registry shows the request as stale (never as safely decidable)."""
+    try:
+        return is_stale_policy(doc)
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _ticket_moved_on(doc: dict, ticket: dict, target: str) -> bool:
@@ -426,7 +466,8 @@ def _visible(doc: dict, viewer: UserPublic) -> bool:
     return viewer.role in PRIVILEGED_VIEWER_ROLES or viewer.username == doc.get("requester_id")
 
 
-def can_decide(doc: dict, viewer: UserPublic, now: Optional[datetime] = None) -> tuple[bool, Optional[str]]:
+def can_decide(doc: dict, viewer: UserPublic, now: Optional[datetime] = None,
+               stale_policy: Optional[bool] = None) -> tuple[bool, Optional[str]]:
     now = _utc(now)
     if doc.get("status") != "pending":
         return False, "This approval request is no longer pending."
@@ -436,12 +477,16 @@ def can_decide(doc: dict, viewer: UserPublic, now: Optional[datetime] = None) ->
         return False, E.MSG_WRONG_ROLE
     if viewer.username == doc.get("requester_id"):
         return False, E.MSG_SELF_APPROVAL
+    if stale_policy if stale_policy is not None else _stale_flag(doc):
+        return False, E.MSG_STALE_POLICY
     return True, None
 
 
 def _to_view(doc: dict, viewer: UserPublic, now: Optional[datetime] = None) -> ApprovalView:
-    ok, reason = can_decide(doc, viewer, now)
-    return ApprovalView.model_validate({**doc, "can_decide": ok, "cannot_decide_reason": reason})
+    stale = _stale_flag(doc)
+    ok, reason = can_decide(doc, viewer, now, stale_policy=stale)
+    return ApprovalView.model_validate({**doc, "can_decide": ok, "cannot_decide_reason": reason,
+                                        "stale_policy": stale})
 
 
 def get_view(approval_id: str, viewer: UserPublic, now: Optional[datetime] = None) -> ApprovalView:

@@ -143,6 +143,29 @@ def embed_with_fallback(texts: list[str]) -> tuple[Optional[list[list[float]]], 
     return None, None
 
 
+def provider_for_model(model: Optional[str]) -> str:
+    """"local_hash" for the hashed fallback (not semantic), "openai" for remote models, "none" otherwise."""
+    if not model:
+        return "none"
+    return "local_hash" if model == LOCAL_MODEL else "openai"
+
+
+def preferred_provider() -> tuple[str, str]:
+    """(provider, model) the indexer would use right now."""
+    model = get_embedder().model
+    return provider_for_model(model), model
+
+
+def retrieval_config_version(extra: Optional[dict] = None) -> str:
+    """Stable id of the retrieval configuration (weights, thresholds, embedding settings)."""
+    cfg = load_config()
+    keys = ("min_relevance", "retrieval_top_k", "embedding_model", "chunk_target_tokens", "chunk_overlap_tokens")
+    data = {k: cfg.get(k) for k in keys}
+    data.update(extra or {})
+    payload = json.dumps(data, sort_keys=True, default=str)
+    return "rcfg-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
 def cosine(a: list[float], b: list[float]) -> float:
     if not a or not b or len(a) != len(b):
         return 0.0

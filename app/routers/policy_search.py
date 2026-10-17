@@ -63,7 +63,7 @@ def evaluate_policy(ticket_id: str = Path(..., pattern=TICKET_ID_PATTERN),
         raise PolicyRagError(404, _NOT_FOUND)
     if not isinstance(ticket.get("workflow_result"), dict) or not ticket.get("run_count"):
         raise PolicyRagError(409, "The workflow has not been run for this ticket yet.")
-    result = policy_eval.evaluate_ticket(ticket, ticket["workflow_result"], admin)
+    result = policy_eval.evaluate_ticket(ticket, ticket["workflow_result"], admin, auto_rate_quotes=True)
     created = False
     if snaps.get_for_run(ticket_id, int(ticket.get("run_count") or 0)) is None:
         try:
@@ -87,9 +87,16 @@ def ticket_evidence(ticket_id: str = Path(..., pattern=TICKET_ID_PATTERN),
     snap = snaps.get_latest(ticket_id)
     if snap is None:
         raise PolicyRagError(404, _NO_EVIDENCE)
+    engine = (snap.get("evaluation") or {}).get("rule_engine")
     if privileged:
-        return snap
-    return policy_eval.redact(snap, ticket_id)
+        return {**snap, "rule_engine": engine, "stale_policy": _stale_policy(ticket_id)}
+    return policy_eval.redact(snap, ticket_id)  # includes a redacted rule_engine (overall + explanations)
+
+
+def _stale_policy(ticket_id: str) -> bool:
+    from app.approvals.service import _stale_flag
+    from app.repositories import approval_repository
+    return any(_stale_flag(d) for d in approval_repository.get_pending_for_ticket(ticket_id))
 
 
 @router.get("/api/rate-cards")

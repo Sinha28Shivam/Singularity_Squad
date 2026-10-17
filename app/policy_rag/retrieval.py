@@ -28,6 +28,21 @@ VECTOR_WEIGHT = 0.4
 HISTORICAL_STATUSES = {"superseded"}
 DEGRADED_WARNING = ("Semantic (vector) retrieval is unavailable; results use keyword-only matching "
                     "(degraded mode). Absence of evidence is not evidence of compliance.")
+LOCAL_HASH_WARNING = ("Vectors come from the local hashed fallback, not a semantic embedding model; retrieval "
+                      "is degraded (hybrid_local_hash). Absence of evidence is not evidence of compliance.")
+DEGRADED_MODES = {"hybrid_local_hash", "keyword_only_degraded"}
+
+
+def _config_version() -> str:
+    return emb.retrieval_config_version({"rrf_k": RRF_K, "kw_weight": KEYWORD_WEIGHT, "vec_weight": VECTOR_WEIGHT})
+
+
+def _mode_metadata(mode: str, model: Optional[str], reason: Optional[str]) -> dict:
+    return {"embedding_provider": emb.provider_for_model(model) if mode != "keyword_only_degraded" else "none",
+            "embedding_model": model if mode != "keyword_only_degraded" else None,
+            "embedding_available": mode == "hybrid",
+            "degradation_reason": None if mode == "hybrid" else reason,
+            "retrieval_config_version": _config_version()}
 _STOPWORDS = frozenset("""a an and are as at be been by can do does for from has have how i if in into is it its
 may must not of on or our per should so such than that the their them then there these they this those to
 under up was we were what when where which who will with within without you your any all also only""".split())
@@ -161,9 +176,13 @@ def search(params: PolicySearchIn, viewer=None, *, min_relevance: Optional[float
             chunks.append(c)
 
     if not chunks:
-        return PolicySearchResult(query_id=query_id, evidence=[], retrieval_mode="hybrid",
+        # Nothing to retrieve: report the mode the configured embedder would provide (no search ran).
+        provider, model = emb.preferred_provider()
+        mode = "hybrid" if provider == "openai" else "hybrid_local_hash"
+        return PolicySearchResult(query_id=query_id, evidence=[], retrieval_mode=mode,
                                   insufficient_evidence=True,
-                                  warnings=["No applicable policy documents are available for this query."])
+                                  warnings=["No applicable policy documents are available for this query."],
+                                  **_mode_metadata(mode, model, "local_hash_embeddings_not_semantic"))
 
     q_terms = _terms(params.query)
     docs_terms = [_terms(f"{c.get('section') or ''} {c.get('text') or ''}") for c in chunks]
@@ -174,19 +193,28 @@ def search(params: PolicySearchIn, viewer=None, *, min_relevance: Optional[float
     models = Counter(c.get("embedding_model") for c in chunks if c.get("embedding") and c.get("embedding_model"))
     vec_scores: list[Optional[float]] = [None] * len(chunks)
     mode = "keyword_only_degraded"
+    model: Optional[str] = None
+    reason = "no_stored_embeddings"
+    vectors_used = False
     if models:
         model = models.most_common(1)[0][0]
         embedder = emb.embedder_for_model(model)
         qv = embedder.embed([params.query]) if embedder is not None else None
         if qv:
-            mode = "hybrid"
+            vectors_used = True
+            mode = "hybrid" if emb.provider_for_model(model) == "openai" else "hybrid_local_hash"
+            reason = "local_hash_embeddings_not_semantic"
             for i, c in enumerate(chunks):
                 if c.get("embedding_model") == model and c.get("embedding"):
                     vec_scores[i] = emb.cosine(qv[0], c["embedding"])
             if sum(models.values()) < len(chunks) or len(models) > 1:
                 warnings.append("Some chunks have no comparable embedding; they are ranked by keywords only.")
-    if mode != "hybrid":
+        else:
+            reason = "embedding_provider_unavailable"
+    if mode == "keyword_only_degraded":
         warnings.append(DEGRADED_WARNING)
+    elif mode == "hybrid_local_hash":
+        warnings.append(LOCAL_HASH_WARNING)
 
     def rank(values: list[Optional[float]]) -> dict[int, int]:
         order = sorted((i for i, v in enumerate(values) if v is not None and v > 0), key=lambda i: -values[i])
@@ -199,7 +227,7 @@ def search(params: PolicySearchIn, viewer=None, *, min_relevance: Optional[float
         if rrf <= 0:
             continue
         v = vec_scores[i]
-        if mode == "hybrid" and v is not None:
+        if vectors_used and v is not None:
             relevance = KEYWORD_WEIGHT * coverage[i] + VECTOR_WEIGHT * max(0.0, v)
         else:
             relevance = coverage[i]
@@ -232,4 +260,5 @@ def search(params: PolicySearchIn, viewer=None, *, min_relevance: Optional[float
     if insufficient:
         warnings.append("No sufficiently relevant policy evidence was found.")
     return PolicySearchResult(query_id=query_id, evidence=evidence, retrieval_mode=mode,
-                              insufficient_evidence=insufficient, warnings=warnings)
+                              insufficient_evidence=insufficient, warnings=warnings,
+                              **_mode_metadata(mode, model, reason))

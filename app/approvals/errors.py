@@ -22,3 +22,4 @@ MSG_TERMINAL = "This approval has already been decided or the request has change
 MSG_STALE = "The request has changed; reload and review the latest version."
 MSG_IDEMPOTENCY_CONFLICT = "Idempotency key was already used with a different request."
 MSG_BLOCKED = "This request is blocked by policy and cannot be approved."
+MSG_STALE_POLICY = "Policy set changed since this request was evaluated; re-run the ticket."

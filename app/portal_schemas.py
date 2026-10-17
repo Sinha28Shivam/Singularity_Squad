@@ -163,6 +163,7 @@ class UserTicketView(BaseModel):
     decision: Optional[Decision] = None
     approval: Optional[dict] = None                # requester-safe approval summary (Phase 2)
     policy_evidence: Optional[dict] = None         # redacted policy findings + citation labels (Policy RAG)
+    policy_status: Optional[dict] = None           # {needs_clarification, blocked, reasons} (both may be true)
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None
 
@@ -184,5 +185,6 @@ class AdminTicketView(BaseModel):
     error: Optional[str] = None
     approval: Optional[dict] = None                # current approval request + history (Phase 2)
     policy_evaluation: Optional[dict] = None       # latest policy evaluation snapshot (Policy RAG)
+    policy_status: Optional[dict] = None           # server-derived requirement flags (clarification AND block)
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None

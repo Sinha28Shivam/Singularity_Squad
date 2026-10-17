@@ -102,6 +102,7 @@ class LineItem(BaseModel):
     quantity: float
     unit_price: float
     line_total: float
+    unit: Optional[str] = None  # pricing unit when known (required for rate-card validation; never guessed)
 
 
 class DraftPO(BaseModel):

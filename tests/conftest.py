@@ -9,11 +9,14 @@ def _offline_mongomock(request, monkeypatch, tmp_path_factory):
     """Run offline and give each test a fresh in-memory MongoDB (unless marked real_mongo).
 
     Policy RAG is disabled by default (POLICY_RAG_ENABLED=0, POLICY_RAG_SEED=0) so pre-RAG behaviour is
-    unchanged; policy tests opt in with monkeypatch.setenv("POLICY_RAG_ENABLED", "1"). PDFs are stored
+    unchanged; policy tests opt in with monkeypatch.setenv("POLICY_RAG_ENABLED", "1"). The Phase 3 rule engine
+    is disabled too (POLICY_RULES_ENABLED=0, POLICY_RULES_BOOTSTRAP=0) unless a test opts in. PDFs are stored
     in a per-test temporary directory."""
     os.environ["WORKPLACEOPS_OFFLINE"] = "1"
     monkeypatch.setenv("POLICY_RAG_ENABLED", "0")
     monkeypatch.setenv("POLICY_RAG_SEED", "0")
+    monkeypatch.setenv("POLICY_RULES_ENABLED", "0")
+    monkeypatch.setenv("POLICY_RULES_BOOTSTRAP", "0")
     monkeypatch.setenv("POLICY_STORE_DIR", str(tmp_path_factory.mktemp("policy_store")))
     if request.node.get_closest_marker("real_mongo"):
         yield

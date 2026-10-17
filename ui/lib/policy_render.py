@@ -12,6 +12,7 @@ from urllib.parse import quote
 import streamlit as st
 
 from ui.lib.api import ApiError, api_get, friendly_error
+from ui.lib.rule_render import render_retrieval_mode, render_rule_engine
 
 OUTCOME_BADGE = {
     "pass": "✅ PASS — no policy issue found in the retrieved evidence",
@@ -81,7 +82,9 @@ def normalize_evaluation(data: Any) -> Optional[dict]:
     inner = data.get("evaluation")
     if isinstance(inner, dict):
         merged = dict(inner)
-        for k in ("snapshot_id", "run_count", "ticket_id", "redacted", "stale_against_approval"):
+        for k in ("snapshot_id", "run_count", "ticket_id", "redacted", "stale_against_approval", "rule_engine",
+                  "stale_policy", "retrieval_mode", "embedding_provider", "embedding_model", "embedding_available",
+                  "degradation_reason", "retrieval_config_version"):
             if k in data and k not in merged:
                 merged[k] = data[k]
         return merged
@@ -104,11 +107,19 @@ def fetch_ticket_evidence(ticket_id: str) -> tuple[Optional[dict], Optional[str]
 def embedded_or_fetch(view: dict, key: str, fetch: bool = True) -> tuple[Optional[dict], Optional[str]]:
     """Use the evaluation embedded in a ticket view under ``key`` if the backend provides it, else fetch."""
     if key in view:
-        return normalize_evaluation(view.get(key)), None
-    tid = view.get("ticket_id")
-    if not tid or not fetch:
-        return None, None
-    return fetch_ticket_evidence(tid)
+        ev = normalize_evaluation(view.get(key))
+    else:
+        tid = view.get("ticket_id")
+        if not tid or not fetch:
+            ev = None
+        else:
+            ev, err = fetch_ticket_evidence(tid)
+            if err:
+                return None, err
+    if isinstance(view.get("rule_engine"), dict):
+        ev = dict(ev or {})
+        ev.setdefault("rule_engine", view["rule_engine"])
+    return ev, None
 
 
 # --------------------------------------------------------------------------- full view
@@ -212,7 +223,7 @@ def render_rate_validation(rv: Optional[dict]) -> None:
 
 
 def render_policy_evidence(evaluation: Optional[dict], *, redacted: bool = False,
-                           heading: str = "📑 Policy evidence") -> None:
+                           heading: str = "📑 Policy evidence", stale_policy: Optional[bool] = None) -> None:
     """Policy evidence panel. ``redacted=True`` shows finding summaries and citation labels only."""
     st.subheader(heading)
     ev = normalize_evaluation(evaluation)
@@ -220,9 +231,17 @@ def render_policy_evidence(evaluation: Optional[dict], *, redacted: bool = False
         st.caption("No policy evaluation is stored for this request yet.")
         return
     redacted = redacted or bool(ev.get("redacted"))
-    _outcome_box(ev.get("outcome"))
+    engine_only = "outcome" not in ev and isinstance(ev.get("rule_engine"), dict)
+    if not engine_only:
+        _outcome_box(ev.get("outcome"))
     if ev.get("retrieval_mode") == "keyword_only_degraded":
         st.warning(DEGRADED_WARNING)
+    if not redacted:
+        render_retrieval_mode(ev)
+    render_rule_engine(ev.get("rule_engine"), redacted=redacted,
+                       stale_policy=bool(ev.get("stale_policy")) if stale_policy is None else stale_policy)
+    if engine_only:
+        return
     findings = [f for f in ev.get("findings") or [] if isinstance(f, dict)]
 
     if redacted:

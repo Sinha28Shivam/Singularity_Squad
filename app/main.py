@@ -27,7 +27,9 @@ from app.routers import auth as auth_router
 from app.routers import my_tickets as my_tickets_router
 from app.routers import policy_documents as policy_documents_router
 from app.routers import policy_search as policy_search_router
+from app.routers import policy_rules as policy_rules_router
 from app.policy_rag.errors import PolicyRagError
+from app.policy_rules.registry import RuleRegistryError
 from app.schemas import DraftPO, ReconciliationReport, WorkflowResult
 from app.services import ticket_service
 from app.services.errors import TicketError
@@ -52,6 +54,20 @@ def _seed_policy_library() -> None:
         logger.warning("Policy library seeding failed (%s).", type(exc).__name__)
 
 
+def _bootstrap_policy_rules() -> None:
+    """Create + auto-approve the legacy_config seed rules as system:bootstrap (POLICY_RULES_BOOTSTRAP=0
+    disables). Idempotent; only logs on failure."""
+    if os.getenv("POLICY_RULES_BOOTSTRAP", "1").strip() == "0":
+        return
+    try:
+        from app.policy_rules.registry import bootstrap_from_seed
+        approved = bootstrap_from_seed(os.getenv("POLICY_RULES_SEED_FILE") or None)
+        if approved:
+            logger.info("Policy rule bootstrap: %d legacy rule(s) approved.", approved)
+    except Exception as exc:  # noqa: BLE001 - never block startup on rule bootstrap
+        logger.warning("Policy rule bootstrap failed (%s).", type(exc).__name__)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     if persistence_mode() == "required":
@@ -67,6 +83,7 @@ async def lifespan(_: FastAPI):
             except Exception as seed_exc:  # noqa: BLE001 - never block startup on approver seeding
                 logger.warning("Approver seeding failed (%s).", type(seed_exc).__name__)
             _seed_policy_library()
+            _bootstrap_policy_rules()
         except Exception as exc:  # noqa: BLE001 - start anyway; health reports unavailable
             logger.warning("MongoDB not reachable at startup (%s); persistence endpoints will return 503.",
                            type(exc).__name__)
@@ -119,6 +136,14 @@ async def _policy_rag_error_handler(_: Request, exc: PolicyRagError):
 
 app.include_router(policy_documents_router.router)
 app.include_router(policy_search_router.router)
+
+
+@app.exception_handler(RuleRegistryError)
+async def _rule_registry_error_handler(_: Request, exc: RuleRegistryError):
+    return JSONResponse(status_code=exc.status_code, content=exc.body())
+
+
+app.include_router(policy_rules_router.router)
 _ADMIN_ONLY = [Depends(require_admin)]
 
 

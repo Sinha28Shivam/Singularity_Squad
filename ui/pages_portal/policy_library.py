@@ -16,6 +16,10 @@ import streamlit as st
 
 from ui.lib.api import ApiError, api_get, api_post, api_post_files, current_user, friendly_error
 from ui.lib.policy_render import DEGRADED_WARNING, render_citations
+from ui.lib.rule_render import (
+    REVIEWABLE_STATUSES, RULE_STATUSES, condition_text, render_retrieval_mode, render_rule_detail,
+    render_warnings, rule_badge, rule_ref,
+)
 
 DOCUMENT_TYPES = ["company_policy", "vendor_policy", "vendor_contract", "privacy_policy", "security_policy",
                   "rate_card", "procurement_guideline", "other"]
@@ -281,6 +285,7 @@ def inventory_section(is_admin: bool) -> None:
     ], width="stretch", hide_index=True)
     if is_admin:
         actions_section(docs)
+        extract_section(docs)
     else:
         st.caption("Read-only: only admins can upload, reprocess or archive documents.")
 
@@ -332,6 +337,339 @@ def _doc_action(document_id: str, action: str) -> None:
     _flash("success", f"Server confirmed {action} of `{document_id}` — status {doc_badge(status)}.")
 
 
+# --------------------------------------------------------------------------- rule extraction (admin)
+def extract_section(docs: list) -> None:
+    ready = [d for d in docs if d.get("status") == "ready" and d.get("document_id")]
+    with st.container(border=True):
+        st.markdown("**🧩 Extract candidate rules**")
+        st.caption("Extraction only proposes *candidate* rules from a ready document. Nothing activates until a "
+                   "policy reviewer validates and approves it in the Rules tab.")
+        if not ready:
+            st.caption("No ready documents to extract rules from.")
+        for d in ready:
+            did = d["document_id"]
+            c1, c2 = st.columns([4, 1])
+            c1.markdown(f"`{did}` · {d.get('filename') or '—'} · v{d.get('version', '?')}")
+            if c2.button("Extract rules", key=f"pl_extract_{did}"):
+                _extract(did)
+                st.rerun()
+    render_extract_view(st.session_state.get("pl_extract_view"))
+
+
+def _extract(document_id: str) -> None:
+    try:
+        data = api_post(f"/api/policy-documents/{quote(document_id, safe='')}/extract-rules", None, timeout=300)
+    except Exception as exc:
+        st.session_state["pl_extract_view"] = {"document_id": document_id, "error": friendly_error(exc)}
+        return
+    if not isinstance(data, dict) or not isinstance(data.get("candidates"), list):
+        st.session_state["pl_extract_view"] = {"document_id": document_id,
+                                               "error": "Extraction outcome could not be confirmed — check the "
+                                                        "Rules tab before retrying."}
+        return
+    st.session_state["pl_extract_view"] = {"document_id": document_id, "candidates": data["candidates"],
+                                           "warnings": data.get("warnings") or [],
+                                           "extraction_model": data.get("extraction_model")}
+
+
+def render_extract_view(view: Optional[dict]) -> None:
+    if not isinstance(view, dict):
+        return
+    did = view.get("document_id")
+    if view.get("error"):
+        st.error(f"Rule extraction for `{did}` failed: {view['error']}")
+        return
+    cands = [c for c in view.get("candidates") or [] if isinstance(c, dict)]
+    model = view.get("extraction_model") or "—"
+    msg = (f"Server extracted {len(cands)} candidate rule(s) from `{did}` (model `{model}`). "
+           "Candidates require review and approval before they take effect.")
+    (st.success if cands else st.info)(msg)
+    render_warnings(view.get("warnings") or [])
+    if cands:
+        st.dataframe([
+            {"Rule": rule_ref(c), "Name": c.get("name") or "—", "Status": rule_badge(c.get("status")),
+             "Condition": condition_text(c.get("condition")),
+             "Confidence": c.get("extraction_confidence") if c.get("extraction_confidence") is not None else "—",
+             "Validation errors": len(c.get("validation_errors") or []),
+             "Warnings": ", ".join(str(w) for w in c.get("warnings") or []) or "—"}
+            for c in cands
+        ], width="stretch", hide_index=True)
+
+
+# --------------------------------------------------------------------------- rules (reviewers)
+RULE_UNCONFIRMED = "Outcome could not be confirmed — the rule and policy set were reloaded; check before retrying."
+RULE_CONFLICT = "⚠️ The rule or the active policy set changed — reloaded. Review again before retrying."
+REJECT_COMMENT_REQUIRED = "A comment is required to reject a rule."
+RULE_ACTIONS = {"approve": "Approve", "reject": "Reject"}
+
+
+def _rule_path(rule_id: str) -> str:
+    return f"/api/policy-rules/{quote(str(rule_id), safe='')}"
+
+
+def _rules_flash(kind: str, text: str) -> None:
+    st.session_state["pl_rules_flash"] = (kind, text)
+
+
+def load_active_set() -> Optional[dict]:
+    """GET /api/policy-set/active → normalized {policy_set_version, rule_refs, created_by, created_at, ...}."""
+    try:
+        data = api_get("/api/policy-set/active")
+    except ApiError as exc:
+        if exc.status_code == 404:
+            st.session_state["pl_active_set"] = {"none": True}
+            return None
+        st.session_state["pl_active_set"] = {"error": friendly_error(exc)}
+        return None
+    except Exception as exc:
+        st.session_state["pl_active_set"] = {"error": friendly_error(exc)}
+        return None
+    if not isinstance(data, dict):
+        st.session_state["pl_active_set"] = {"error": "Unexpected response from backend."}
+        return None
+    ps = data.get("policy_set") if isinstance(data.get("policy_set"), dict) else data
+    out = dict(ps)
+    if isinstance(data.get("rules"), list):
+        out["rules"] = data["rules"]
+    prev = st.session_state.get("pl_active_set")
+    if isinstance(prev, dict) and prev.get("policy_set_version") is not None \
+            and prev.get("policy_set_version") != out.get("policy_set_version"):
+        out["diff_from"] = {"version": prev.get("policy_set_version"), "rule_refs": prev.get("rule_refs") or []}
+    elif isinstance(prev, dict) and prev.get("diff_from") and prev.get("policy_set_version") == \
+            out.get("policy_set_version"):
+        out["diff_from"] = prev["diff_from"]
+    st.session_state["pl_active_set"] = out
+    return out
+
+
+def _active_version() -> Optional[int]:
+    ps = st.session_state.get("pl_active_set")
+    if isinstance(ps, dict) and isinstance(ps.get("policy_set_version"), int):
+        return ps["policy_set_version"]
+    return None
+
+
+def active_set_banner() -> None:
+    ps = st.session_state.get("pl_active_set")
+    if not isinstance(ps, dict) or "policy_set_version" not in ps:
+        if isinstance(ps, dict) and ps.get("error"):
+            st.warning(f"Active policy set unavailable: {ps['error']}")
+        else:
+            st.info("No active policy set yet — no approved rules are being enforced.")
+        return
+    refs = [str(r) for r in ps.get("rule_refs") or []]
+    st.info(f"**Active policy set v{ps['policy_set_version']}** · {len(refs)} rule(s) · created by "
+            f"{ps.get('created_by') or '—'} at {ps.get('created_at') or '—'}"
+            + (f" · reason: {ps['reason']}" if ps.get("reason") else "")
+            + (f" · previous v{ps['previous_version']}" if ps.get("previous_version") is not None else ""))
+    st.caption("Rules: " + (", ".join(f"`{r}`" for r in refs) if refs else "none"))
+    diff = ps.get("diff_from")
+    if isinstance(diff, dict):
+        old = set(str(r) for r in diff.get("rule_refs") or [])
+        added, removed = sorted(set(refs) - old), sorted(old - set(refs))
+        st.caption(f"Changed since v{diff.get('version')}: "
+                   f"added {', '.join(f'`{r}`' for r in added) or 'none'}; "
+                   f"removed {', '.join(f'`{r}`' for r in removed) or 'none'}")
+
+
+def load_rule(rule_id: str, version: Any) -> Optional[dict]:
+    try:
+        data = api_get(f"{_rule_path(rule_id)}/versions/{quote(str(version), safe='')}")
+    except Exception as exc:
+        st.session_state.pop("pl_rule_view", None)
+        _rules_flash("error", friendly_error(exc))
+        return None
+    rule = data.get("rule") if isinstance(data, dict) and isinstance(data.get("rule"), dict) else data
+    if not isinstance(rule, dict) or not rule.get("rule_id"):
+        st.session_state.pop("pl_rule_view", None)
+        _rules_flash("error", "Unexpected response from backend.")
+        return None
+    st.session_state["pl_rule_view"] = rule
+    return rule
+
+
+def _reload_after_action(rule_id: str, version: Any) -> None:
+    flash = st.session_state.get("pl_rules_flash")
+    load_rule(rule_id, version)
+    load_active_set()
+    if flash is not None:
+        st.session_state["pl_rules_flash"] = flash
+
+
+def rules_section() -> None:
+    top1, top2 = st.columns([5, 1])
+    top1.subheader("📏 Policy rules")
+    if top2.button("🔄 Refresh", key="pl_rules_refresh"):
+        st.session_state.pop("pl_active_set_loaded", None)
+        view = st.session_state.get("pl_rule_view")
+        if isinstance(view, dict):
+            load_rule(view["rule_id"], view.get("rule_version"))
+        st.rerun()
+    st.caption("Rules are typed, versioned data. Only rules approved by a policy reviewer enter the active "
+               "policy set. Approving records a policy decision only — it never places orders or payments.")
+    if not st.session_state.get("pl_active_set_loaded"):
+        load_active_set()
+        st.session_state["pl_active_set_loaded"] = True
+    msg = st.session_state.pop("pl_rules_flash", None)
+    if msg:
+        kind, text = msg
+        {"error": st.error, "warning": st.warning}.get(kind, st.success)(text)
+    active_set_banner()
+
+    status = st.selectbox("Status filter", [None] + RULE_STATUSES, key="pl_rules_status",
+                          format_func=lambda s: "All statuses" if s is None else rule_badge(s))
+    try:
+        data = api_get("/api/policy-rules", params={"status": status} if status else None)
+    except Exception as exc:
+        st.error(friendly_error(exc))
+        return
+    data = data if isinstance(data, dict) else {"rules": data if isinstance(data, list) else []}
+    counts = data.get("counts") if isinstance(data.get("counts"), dict) else {}
+    shown = [s for s in RULE_STATUSES if s in REVIEWABLE_STATUSES or counts.get(s)]
+    cols = st.columns(len(shown))
+    for col, s in zip(cols, shown):
+        col.metric(rule_badge(s), int(counts.get(s, 0) or 0))
+    rules = _items(data, "rules")
+    if not rules:
+        st.info("No policy rules match this filter.")
+    else:
+        st.dataframe([
+            {"Rule": rule_ref(r), "Name": r.get("name") or "—", "Status": rule_badge(r.get("status")),
+             "Severity": r.get("severity") or "—",
+             "Decision": ((r.get("outcome") or {}).get("decision") or "—").replace("_", " "),
+             "Reason code": (r.get("outcome") or {}).get("reason_code") or "—",
+             "Condition": condition_text(r.get("condition")),
+             "Source": str(r.get("source") or "—").replace("_", " "),
+             "Confidence": r.get("extraction_confidence") if r.get("extraction_confidence") is not None else "—",
+             "Errors": len(r.get("validation_errors") or []), "Conflicts": len(r.get("conflict_refs") or [])}
+            for r in rules
+        ], width="stretch", hide_index=True)
+    by_ref = {rule_ref(r): r for r in rules if r.get("rule_id")}
+
+    def _pick() -> None:
+        ref = st.session_state.get("pl_rule_pick")
+        r = by_ref.get(ref) if ref else None
+        if r:
+            st.session_state.pop("pl_rule_confirm", None)
+            load_rule(r["rule_id"], r.get("rule_version"))
+
+    st.selectbox("Open a rule", [None] + list(by_ref.keys()), key="pl_rule_pick", on_change=_pick,
+                 format_func=lambda x: "(select a rule)" if x is None else
+                 f"{x} · {by_ref[x].get('name', '')} · {rule_badge(by_ref[x].get('status'))}")
+    view = st.session_state.get("pl_rule_view")
+    if isinstance(view, dict) and view.get("rule_id"):
+        st.divider()
+        render_rule_detail(view)
+        rule_actions(view)
+
+
+def rule_actions(rule: dict) -> None:
+    st.markdown("#### 🧑‍⚖️ Review")
+    if rule.get("status") not in REVIEWABLE_STATUSES:
+        st.caption(f"This rule version is {rule_badge(rule.get('status'))} and cannot be reviewed.")
+        return
+    rid, ver = rule["rule_id"], rule.get("rule_version")
+    if st.button("☑️ Validate", key="pl_rule_validate_btn"):
+        _validate(rid, ver)
+        st.rerun()
+    vres = st.session_state.get("pl_rule_validation")
+    if isinstance(vres, dict) and vres.get("ref") == rule_ref(rule):
+        if vres.get("errors"):
+            st.error("Validation failed:\n\n" + "\n".join(f"- {e}" for e in vres["errors"]))
+        elif vres.get("valid"):
+            st.success("Server validation passed.")
+        if vres.get("conflicts"):
+            st.warning("Conflicts:\n\n" + "\n".join(f"- {c}" for c in vres["conflicts"]))
+    action = st.radio("Decision", list(RULE_ACTIONS.keys()), format_func=lambda a: RULE_ACTIONS[a],
+                      horizontal=True, key="pl_rule_action")
+    comment = st.text_area("Comment (required to reject)", key="pl_rule_comment", max_chars=1000)
+    expected = _active_version()
+    st.caption(f"Decision applies to `{rule_ref(rule)}` against active policy set "
+               f"{'v' + str(expected) if expected is not None else '(none)'}.")
+    checked = st.checkbox(f"I have reviewed the condition, outcome and source evidence and want to "
+                          f"{RULE_ACTIONS[action].lower()} this rule.", key="pl_rule_confirm")
+    inflight = bool(st.session_state.get("pl_rule_inflight"))
+    if st.button(f"Confirm {RULE_ACTIONS[action].lower()}", key="pl_rule_submit_btn", type="primary",
+                 disabled=not checked or inflight):
+        text = (comment or "").strip()
+        if action == "reject" and not text:
+            st.error(REJECT_COMMENT_REQUIRED)
+            return
+        _decide(rid, ver, action, text or None, expected)
+        st.rerun()
+
+
+def _validate(rule_id: str, version: Any) -> None:
+    try:
+        data = api_post(f"{_rule_path(rule_id)}/validate", {"rule_version": version}, timeout=60)
+    except Exception as exc:
+        _rules_flash("warning" if isinstance(exc, ApiError) and exc.status_code == 409 else "error",
+                     friendly_error(exc))
+        _reload_after_action(rule_id, version)
+        return
+    data = data if isinstance(data, dict) else {}
+    rule = data.get("rule") if isinstance(data.get("rule"), dict) else {}
+    errors = data.get("validation_errors") or data.get("errors") or rule.get("validation_errors") or []
+    conflicts = data.get("conflicts") or data.get("conflict_refs") or rule.get("conflict_refs") or []
+    valid = data.get("valid")
+    if valid is None:
+        valid = not errors and (rule.get("status") == "validated" or data.get("status") == "validated")
+    st.session_state["pl_rule_validation"] = {
+        "ref": f"{rule_id}@{version}", "valid": bool(valid),
+        "errors": [str(e) for e in errors],
+        "conflicts": [c if isinstance(c, str) else json.dumps(c, sort_keys=True) for c in conflicts]}
+    _reload_after_action(rule_id, version)
+
+
+def _decide(rule_id: str, version: Any, action: str, comment: Optional[str], expected: Optional[int]) -> None:
+    body: dict = {"rule_version": version}
+    if comment:
+        body["comment"] = comment
+    if expected is not None:
+        body["expected_policy_set_version"] = expected
+    st.session_state["pl_rule_inflight"] = True
+    try:
+        data = api_post(f"{_rule_path(rule_id)}/{action}", body, timeout=60)
+    except ApiError as exc:
+        if exc.status_code == 409:
+            _rules_flash("warning", f"{RULE_CONFLICT} ({exc.detail})" if exc.detail else RULE_CONFLICT)
+        elif exc.status_code == 403:
+            _rules_flash("error", f"⛔ Not permitted: {exc.detail or 'policy reviewer access required.'}")
+        elif exc.status_code >= 500:
+            _rules_flash("error", f"{friendly_error(exc)} {RULE_UNCONFIRMED}")
+        else:
+            _rules_flash("error", friendly_error(exc))
+        _reload_after_action(rule_id, version)
+        return
+    except Exception as exc:
+        _rules_flash("error", f"{friendly_error(exc)} {RULE_UNCONFIRMED}")
+        _reload_after_action(rule_id, version)
+        return
+    finally:
+        st.session_state.pop("pl_rule_inflight", None)
+    data = data if isinstance(data, dict) else {}
+    rule = data.get("rule") if isinstance(data.get("rule"), dict) else data
+    expected_status = "approved" if action == "approve" else "rejected"
+    for k in ("pl_rule_confirm", "pl_rule_comment"):
+        st.session_state.pop(k, None)
+    if rule.get("status") != expected_status:
+        _rules_flash("error", RULE_UNCONFIRMED)
+        _reload_after_action(rule_id, version)
+        return
+    if action == "approve":
+        psv = data.get("policy_set_version")
+        if isinstance(psv, dict):
+            psv = psv.get("policy_set_version")
+        msg = (f"Server approved `{rule_ref(rule)}` — active policy set is now v{psv}."
+               if psv is not None else f"Server approved `{rule_ref(rule)}`.")
+        if data.get("replayed"):
+            msg += " (Already approved earlier — nothing changed.)"
+    else:
+        msg = f"Server rejected `{rule_ref(rule)}`."
+    _rules_flash("success", msg)
+    _reload_after_action(rule["rule_id"], rule.get("rule_version", version))
+
+
 # --------------------------------------------------------------------------- search
 def search_section() -> None:
     st.subheader("🔎 Policy search")
@@ -368,6 +706,7 @@ def render_search_result(res: Any) -> None:
         return
     mode = res.get("retrieval_mode") or "unknown"
     st.caption(f"Retrieval mode: **{mode}** · query `{res.get('query_id', '—')}`")
+    render_retrieval_mode(res)
     if mode == "keyword_only_degraded":
         st.warning(DEGRADED_WARNING)
     for w in res.get("warnings") or []:
@@ -468,14 +807,16 @@ def render() -> None:
         kind, text = msg
         {"error": st.error, "warning": st.warning}.get(kind, st.success)(text)
     if is_admin:
-        t_up, t_inv, t_search, t_rate = st.tabs(["Upload", "Inventory", "Search", "Rate cards"])
+        t_up, t_inv, t_search, t_rate, t_rules = st.tabs(["Upload", "Inventory", "Search", "Rate cards", "Rules"])
         with t_up:
             upload_section()
     else:
-        t_inv, t_search, t_rate = st.tabs(["Inventory", "Search", "Rate cards"])
+        t_inv, t_search, t_rate, t_rules = st.tabs(["Inventory", "Search", "Rate cards", "Rules"])
     with t_inv:
         inventory_section(is_admin)
     with t_search:
         search_section()
     with t_rate:
         rate_cards_section()
+    with t_rules:
+        rules_section()

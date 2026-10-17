@@ -115,6 +115,7 @@ class ApprovalListItem(BaseModel):
 class ApprovalView(ApprovalRequest):
     can_decide: bool = False
     cannot_decide_reason: Optional[str] = None
+    stale_policy: bool = False    # pending request bound to a policy set that is no longer active
     safety_notice: str = APPROVAL_SAFETY_NOTICE
 
 

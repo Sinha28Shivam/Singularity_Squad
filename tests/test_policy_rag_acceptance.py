@@ -371,7 +371,7 @@ def test_synthetic_policy_rag_end_to_end(test_db, tmp_path):
         assert user.post("/api/policy/search", json={"query": "quotation threshold"}).status_code == 403
         res = _search(approver, "three written quotations approval threshold purchase")
         assert res["insufficient_evidence"] is False
-        assert res["retrieval_mode"] in ("hybrid", "keyword_only_degraded")
+        assert res["retrieval_mode"] in ("hybrid", "hybrid_local_hash", "keyword_only_degraded")
         top = res["evidence"][0]
         assert top["document_id"] == doc_ids["Synthetic Procurement Policy.pdf"], top
         assert top["filename"] == "Synthetic Procurement Policy.pdf"

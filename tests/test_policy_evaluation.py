@@ -52,7 +52,10 @@ def test_empty_library_is_unknown_with_insufficient_evidence_not_error():
 def test_review_required_vendor_verification_cites_real_evidence():
     seed_basic_library()
     res = evaluation.evaluate_ticket(_ticket(), _wr())
-    assert res.outcome == "review_required" and res.retrieval_mode == "hybrid"
+    # offline: local hashed vectors are not semantic -> accurate degraded label + reason code
+    assert res.outcome == "review_required" and res.retrieval_mode == "hybrid_local_hash"
+    assert res.embedding_provider == "local_hash" and res.embedding_available is False
+    assert "POLICY_RETRIEVAL_DEGRADED" in res.approval_reason_codes
     vv = next(f for f in res.findings if f.rule_id == "vendor_verification")
     assert vv.severity == "review_required" and vv.evidence_ids
     ids = {e.evidence_id for e in res.evidence}

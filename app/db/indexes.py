@@ -62,6 +62,19 @@ def _ensure_policy_rag_a_indexes(db: Database) -> None:
                                   name="policy_event_document")
 
 
+def _ensure_policy_rule_indexes(db: Database) -> None:
+    """Phase 3 rule registry: rule versions, immutable policy sets and the append-only rule audit."""
+    rules = db.policy_rules
+    rules.create_index([("rule_id", ASCENDING), ("rule_version", ASCENDING)], unique=True,
+                       name="rule_version_unique")
+    rules.create_index([("status", ASCENDING), ("rule_id", ASCENDING)], name="rule_status")
+    rules.create_index([("semantic_hash", ASCENDING)], name="rule_semantic_hash")
+    db.policy_sets.create_index([("policy_set_version", ASCENDING)], unique=True,
+                                name="policy_set_version_unique")
+    db.policy_rule_events.create_index([("created_at", ASCENDING)], name="rule_event_time")
+    db.policy_rule_events.create_index([("rule_id", ASCENDING), ("created_at", ASCENDING)], name="rule_event_rule")
+
+
 def ensure_indexes(db: Optional[Database] = None) -> None:
     db = db if db is not None else get_database()
     try:
@@ -83,5 +96,6 @@ def ensure_indexes(db: Optional[Database] = None) -> None:
         _ensure_approval_indexes(db)
         _ensure_policy_rag_b_indexes(db)
         _ensure_policy_rag_a_indexes(db)
+        _ensure_policy_rule_indexes(db)
     except PyMongoError as exc:
         raise PersistenceError("Database unavailable: could not initialize indexes. Please try again later.") from exc

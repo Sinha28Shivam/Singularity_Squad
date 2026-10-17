@@ -29,7 +29,10 @@ FindingStatus = Literal["pass", "fail", "unknown", "conflict", "not_applicable"]
 RateValidationStatus = Literal["pass", "fail", "unknown", "conflict", "needs_review"]
 VerificationStatus = Literal["needs_review", "verified", "rejected"]
 EvaluationOutcome = Literal["pass", "review_required", "hard_block", "unknown"]
-RetrievalMode = Literal["hybrid", "keyword_only_degraded"]
+# "hybrid" = keyword + real semantic embeddings; "hybrid_local_hash" = keyword + local hashed vectors (not
+# semantic); "keyword_only_degraded" = no comparable vectors. Anything but "hybrid" is reported as degraded.
+RetrievalMode = Literal["hybrid", "hybrid_local_hash", "keyword_only_degraded"]
+EmbeddingProvider = Literal["openai", "local_hash", "none"]
 
 
 class PolicyDocumentMetadataIn(BaseModel):
@@ -139,6 +142,11 @@ class PolicySearchResult(BaseModel):
     retrieval_mode: RetrievalMode
     insufficient_evidence: bool = False
     warnings: list[str] = Field(default_factory=list)
+    embedding_provider: Optional[EmbeddingProvider] = None
+    embedding_model: Optional[str] = None
+    embedding_available: Optional[bool] = None       # True only when semantic embeddings were used
+    degradation_reason: Optional[str] = None
+    retrieval_config_version: Optional[str] = None
 
 
 class RateCardEntry(BaseModel):
@@ -200,6 +208,13 @@ class RateValidationResult(BaseModel):
     rate_card_version: Optional[str] = None
     validation_status: RateValidationStatus
     reason: str
+    # Set when the quote was built from a draft-PO line during a ticket run.
+    line_index: Optional[int] = None
+    line_description: Optional[str] = None
+    vendor_key: Optional[str] = None
+    item_or_service_code: Optional[str] = None
+    unit: Optional[str] = None
+    missing_fields: list[str] = Field(default_factory=list)   # required quote fields absent (never guessed)
 
 
 class PolicyFinding(BaseModel):
@@ -235,6 +250,17 @@ class PolicyEvaluationResult(BaseModel):
     summary: Optional[str] = None                                    # optional LLM explanation (advisory)
     evaluation_hash: str = ""                                        # sha256 of canonical evaluation fields
     schema_version: int = 1
+    # Phase 3 additions (Optional; old snapshots stay valid).
+    rate_validations: list[RateValidationResult] = Field(default_factory=list)  # one per validated PO line
+    rate_applicable: Optional[bool] = None
+    rate_not_applicable_reason: Optional[str] = None
+    embedding_provider: Optional[EmbeddingProvider] = None
+    embedding_model: Optional[str] = None
+    embedding_available: Optional[bool] = None
+    degradation_reason: Optional[str] = None
+    retrieval_config_version: Optional[str] = None
+    # RuleEngineEvaluation JSON (own engine_hash; excluded from evaluation_hash).
+    rule_engine: Optional[dict] = None
 
 
 class EvidenceSnapshot(BaseModel):

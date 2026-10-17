@@ -3,7 +3,7 @@
 Event types: document_uploaded, document_validation_failed, document_extraction_completed,
 document_indexing_completed, document_marked_needs_review, document_version_superseded, document_archived,
 document_reprocessed, rate_card_extraction_created, rate_card_verified, policy_evaluation_completed,
-policy_conflict_detected.
+policy_conflict_detected, rule_engine_evaluated.
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ EVENT_TYPES = frozenset({
     "document_uploaded", "document_validation_failed", "document_extraction_completed",
     "document_indexing_completed", "document_marked_needs_review", "document_version_superseded",
     "document_archived", "document_reprocessed", "rate_card_extraction_created", "rate_card_verified",
-    "policy_evaluation_completed", "policy_conflict_detected",
+    "policy_evaluation_completed", "policy_conflict_detected", "rule_engine_evaluated",
 })
 # Fields that could carry document contents or server paths are dropped defensively.
 _FORBIDDEN_FIELDS = frozenset({"text", "excerpt", "content", "path", "storage_path", "storage_name", "data"})
