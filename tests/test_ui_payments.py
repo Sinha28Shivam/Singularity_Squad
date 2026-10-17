@@ -122,6 +122,14 @@ class PaymentBackend(FakeBackend):
         return FakeResponse(404, {"detail": "Not found"})
 
     def _dispatch(self, method, path, params, body, headers):
+        m = re.match(r"^/api/admin/tickets/([^/]+)/invoice-match$", path)
+        if m and method == "POST":
+            t = self.tickets[m.group(1)]
+            t["invoice_match"] = {"invoice_id": body["invoice_id"], "status": "match", "invoiced_total": 76125.0,
+                                  "post_approval": True}
+            t["workflow_result"].setdefault("procurement", {"po": {"po_id": "DRAFT-PO-REQ-1", "total": 76125.0,
+                                                                   "currency": "INR"}})
+            return FakeResponse(200, t)
         if path.startswith(BASE):
             user = self._user(headers)
             if user is None:
@@ -344,6 +352,21 @@ def test_ticket_without_reconciliation(backend):
     at = select_ticket(page(backend, "admin"), tid)
     assert "no reconciled invoice" in texts(at)
     assert not any("/eligibility/" in c[1] for c in backend.calls)
+    assert_safe(at)
+
+
+def test_match_invoice_after_approval_then_eligibility(backend):
+    tid = backend.add_ticket(status="approved", run_count=1, result={"final_status": "pass"})
+    at = select_ticket(page(backend, "admin"), tid)
+    at.selectbox(key="pay_match_invoice").select("INV-5001")
+    run(at)
+    at.button(key="pay_match_btn").click()
+    run(at)
+    posts = backend.find("POST", f"/api/admin/tickets/{tid}/invoice-match")
+    assert posts and posts[-1][2] == {"invoice_id": "INV-5001"}
+    body = texts(at)
+    assert "matched against the approved PO" in body
+    assert any("/eligibility/INV-5001" in c[1] for c in backend.calls)
     assert_safe(at)
 
 

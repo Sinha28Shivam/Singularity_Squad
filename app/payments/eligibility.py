@@ -208,6 +208,17 @@ def evaluate_eligibility(ticket_id: str, invoice_id: str, actor: UserPublic, *,
     procurement = _dict(wr.get("procurement"))
     po = procurement.get("po") if isinstance(procurement.get("po"), dict) else None
     recon = wr.get("reconciliation") if isinstance(wr.get("reconciliation"), dict) else None
+    # Invoice matched after approval (ticket_service.match_invoice_after_approval): only valid while it is
+    # bound to the current run and the PO the approval covers; otherwise it is ignored (fail closed).
+    post_match = (ticket or {}).get("invoice_match")
+    post_approval_match = False
+    if recon is None and isinstance(post_match, dict) and post_match.get("post_approval"):
+        recon = post_match
+        post_approval_match = True
+        if (post_match.get("run_count") != int((ticket or {}).get("run_count") or 0)
+                or post_match.get("po_id") != (po or {}).get("po_id")
+                or _to_money(post_match.get("po_total")) != _to_money((po or {}).get("total"))):
+            reasons.add("APPROVAL_STALE", "The post-approval invoice match no longer matches the approved PO.")
 
     if ticket is None:
         reasons.add("TICKET_NOT_APPROVED", "The ticket was not found.")
@@ -284,7 +295,11 @@ def evaluate_eligibility(ticket_id: str, invoice_id: str, actor: UserPublic, *,
         snap_po = snap.get("po") if isinstance(snap.get("po"), dict) else None
         snap_recon = snap.get("reconciliation") if isinstance(snap.get("reconciliation"), dict) else None
 
-        if snap_recon is None or snap_recon.get("invoice_id") != invoice_id or snap_recon.get("status") != "match":
+        if post_approval_match:
+            # The approval covered the PO before the invoice arrived; the invoice must not have been part of it.
+            if snap_recon is not None:
+                reasons.add("APPROVAL_STALE", "The approval covered a different invoice reconciliation.")
+        elif snap_recon is None or snap_recon.get("invoice_id") != invoice_id or snap_recon.get("status") != "match":
             reasons.add("APPROVAL_STALE", "The approval does not cover this matched invoice.")
         if snap_po is None:
             reasons.add("APPROVAL_STALE", "The approval does not cover a purchase order.")
@@ -302,7 +317,7 @@ def evaluate_eligibility(ticket_id: str, invoice_id: str, actor: UserPublic, *,
             if _canon_po(snap_po) != _canon_po(po):
                 reasons.add("APPROVAL_STALE", "The purchase order changed after approval.")
             cur_recon = ({"invoice_id": recon.get("invoice_id"), "status": recon.get("status")}
-                         if recon is not None else None)
+                         if recon is not None and not post_approval_match else None)
             if _canon(snap_recon) != _canon(cur_recon):
                 reasons.add("APPROVAL_STALE", "The invoice reconciliation changed after approval.")
         bound = bound_policy_set_version(approval)

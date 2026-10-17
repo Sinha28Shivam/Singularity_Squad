@@ -50,6 +50,7 @@ from app.repositories import (
     save_run_result,
     set_decision,
     set_po_approval,
+    set_invoice_match,
     set_status,
     update_submission,
     update_ticket_result,
@@ -406,6 +407,50 @@ def decide_ticket(ticket_id: str, admin: UserPublic, decision: str, note: Option
     return _load(ticket_id)
 
 
+def match_invoice_after_approval(ticket_id: str, admin: UserPublic, invoice_id: str) -> dict:
+    """Reconcile a (synthetic) invoice that arrived after approval against the ticket's approved draft PO.
+
+    The workflow result, PO and approval are not changed (re-running would supersede the approval); the
+    result is stored separately as ``invoice_match`` and bound to the approved PO and run. Nothing is paid.
+    Re-matching is refused once a simulated payment exists for the ticket.
+    """
+    from app.agents import billing, policy
+    from app.schemas import DraftPO
+
+    _require_persistence()
+    doc = _load(ticket_id)
+    if doc.get("status") != "approved":
+        raise TicketError(409, "An invoice can be matched after approval only on an approved ticket.")
+    wr = doc.get("workflow_result") or {}
+    if isinstance(wr.get("reconciliation"), dict):
+        raise TicketError(409, "This ticket's invoice was already reconciled during the workflow run.")
+    po = (wr.get("procurement") or {}).get("po")
+    if not isinstance(po, dict):
+        raise TicketError(409, "This ticket has no draft PO to match an invoice against.")
+    invoice = billing.get_invoice(invoice_id)
+    if invoice is None:
+        raise TicketError(404, f"Invoice {invoice_id} not found.")
+    from app.repositories.payment_repository import list_simulations
+    if list_simulations(ticket_id, limit=1):
+        raise TicketError(409, "A simulated payment already exists for this ticket; the invoice can't change.")
+
+    draft = DraftPO(**po)
+    inv, delivery, _ = billing.bind_demo_documents(invoice, billing.get_delivery(invoice.delivery_id), draft)
+    rec = billing.reconcile(inv, draft, delivery, billing.load_history(), policy.load_rules())
+    at = _now()
+    match = rec.model_dump(mode="json")
+    match.update({"po_id": draft.po_id, "po_total": draft.total, "currency": draft.currency,
+                  "run_count": int(doc.get("run_count") or 0), "matched_by": admin.username, "matched_at": at,
+                  "post_approval": True})
+    if not set_invoice_match(ticket_id, match, expected={"approved"}):
+        raise TicketError(409, "Ticket status changed; please reload and try again.")
+    _audit_event(ticket_id, "Billing Guardian", "post_approval_invoice_match",
+                 f"{rec.invoice_id} matched after approval against approved {draft.po_id}: {rec.status}; "
+                 f"expected INR {rec.expected_total:,.2f}, invoiced INR {rec.invoiced_total:,.2f}. "
+                 f"{rec.recommendation} No payment was made.", status="pass" if rec.status == "match" else "fail")
+    return _load(ticket_id)
+
+
 def _note(author: UserPublic, text: str) -> dict:
     return TicketNote(author=author.username, role=author.role, text=text, created_at=_now()).model_dump()
 
@@ -667,6 +712,7 @@ def to_admin_view(doc: dict, viewer: Optional[UserPublic] = None) -> AdminTicket
         approval=_ticket_approval(doc, viewer or _SYSTEM_ADMIN_VIEWER),
         policy_evaluation=_latest_policy_evaluation(doc),
         policy_status=_policy_status(doc),
+        invoice_match=doc.get("invoice_match"),
         ticket_id=doc["ticket_id"],
         status=doc.get("status") or "unknown",
         owner_username=doc.get("owner_username"),

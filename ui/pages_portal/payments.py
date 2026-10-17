@@ -15,13 +15,17 @@ from urllib.parse import quote
 import streamlit as st
 
 from ui.lib.api import (
-    SIMULATION_BANNER, api_get, create_simulation, current_user, eligibility, friendly_error, get_payment,
+    SIMULATION_BANNER, api_get, api_post, create_simulation, fetch_invoices, current_user, eligibility, friendly_error, get_payment,
     get_payment_events, list_payments, payment_error, payment_status_label, retry_payment,
 )
 from ui.lib.approval_render import fmt_ts
 from ui.lib.render import format_inr
 
 RETRYABLE = {"failed_simulated"}
+NO_INVOICE = ("This ticket has no reconciled invoice — run the workflow with an invoice, or match the "
+              "invoice against the approved PO below.")
+INVOICE_LABELS = {"INV-5001": "INV-5001 — clean match", "INV-5002": "INV-5002 — rate + qty mismatch",
+                  "INV-4987": "INV-4987 — duplicate"}
 REPLAY_NOTICE = "Existing simulated payment returned (idempotent replay)"
 READ_ONLY_NOTICE = ("Read-only: approvers can review simulated payments but cannot initiate them. "
                     "Initiation is restricted to operations admins.")
@@ -228,8 +232,30 @@ def _ticket_invoice(ticket_id: str) -> tuple[Optional[str], Optional[str]]:
         return None, friendly_error(exc, ticket=True)
     wr = view.get("workflow_result") if isinstance(view, dict) else None
     recon = wr.get("reconciliation") if isinstance(wr, dict) else None
+    if not isinstance(recon, dict) and isinstance(view, dict) and isinstance(view.get("invoice_match"), dict):
+        recon = view["invoice_match"]  # invoice matched after approval
     inv = recon.get("invoice_id") if isinstance(recon, dict) else None
-    return (inv, None) if inv else (None, "This ticket has no reconciled invoice — run the workflow with an invoice.")
+    return (inv, None) if inv else (None, NO_INVOICE)
+
+
+def _invoice_match_form(ticket_id: str) -> None:
+    """Approved ticket without an invoice: match a (synthetic) invoice against the approved PO, no re-approval."""
+    st.caption("Match the vendor's invoice against the **approved** draft PO. The approval and PO are not "
+               "changed, and no money moves.")
+    try:
+        options = [i.get("invoice_id") for i in fetch_invoices() if isinstance(i, dict) and i.get("invoice_id")]
+    except Exception:  # noqa: BLE001
+        options = []
+    options = options or ["INV-5001", "INV-5002", "INV-4987"]
+    inv = st.selectbox("Invoice to match", options, format_func=lambda x: INVOICE_LABELS.get(x, x),
+                       key="pay_match_invoice")
+    if st.button("🧾 Match invoice", key="pay_match_btn"):
+        try:
+            api_post(f"/api/admin/tickets/{quote(ticket_id, safe='')}/invoice-match", {"invoice_id": inv})
+            _flash("info", f"Invoice {inv} matched against the approved PO. Check eligibility below.")
+        except Exception as exc:  # noqa: BLE001
+            _flash("error", friendly_error(exc, ticket=True))
+        st.rerun()
 
 
 def _reset_confirm_on_intent_change(intent: str) -> None:
@@ -285,6 +311,8 @@ def admin_view() -> None:
         invoice_id, err = _ticket_invoice(tid)
         if err:
             st.warning(err)
+            if err == NO_INVOICE:
+                _invoice_match_form(tid)
         else:
             intent = f"{tid}|{invoice_id}"
             _reset_confirm_on_intent_change(intent)

@@ -1393,6 +1393,21 @@ sequenceDiagram
     end
 ```
 
+**Invoice matched after approval.** A ticket approved without an invoice (the admin ran it with "Invoice to check = None") has no reconciliation, so payment eligibility reports `RECONCILIATION_REQUIRED`. Re-running an approved ticket isn't allowed, because it would supersede the approval. Instead the admin uses `POST /api/admin/tickets/{ticket_id}/invoice-match` with `{"invoice_id": "INV-5001"}`, or the **🧾 Match invoice** picker on the Payments page.
+
+What the match step does:
+- It reconciles the invoice against the **approved, unchanged** draft PO with the same Billing Guardian checks (rates, quantities, delivery, duplicate history).
+- It stores the result as `ticket.invoice_match`, bound to the approved `po_id`, PO total and `run_count`. `workflow_result`, the approval and the PO are untouched, and it adds a `post_approval_invoice_match` audit event.
+
+When it is allowed:
+- Admin only.
+- Ticket must be `approved` and must not already have a workflow reconciliation (`409`). An unknown invoice gives `404`.
+- It is refused once a simulated payment exists for the ticket (`409`).
+
+How eligibility treats the match:
+- The gate accepts it only if it still binds to the current run and the approved PO; otherwise the result is `APPROVAL_STALE`.
+- A mismatched or duplicate invoice still blocks (`INVOICE_MATCH_FAILED`, `DUPLICATE_INVOICE`).
+
 State machine: `submitted_to_simulator → accepted_by_simulator | processing_simulated | failed_simulated`, `processing_simulated → accepted_by_simulator | failed_simulated`, and `failed_simulated → submitted_to_simulator` (explicit retry only). `accepted_by_simulator` is terminal. Any other transition is rejected. "blocked" and "ready_for_simulation" are eligibility results and are never stored as payment records.
 
 ### 14.5 Idempotency, concurrency and audit
@@ -1459,4 +1474,8 @@ PAYMENT_SIMULATOR_PROFILE=normal     # normal | processing | transient_failure (
     - The payment persisted.
     - The `transient_failure` profile gave `failed_simulated`, then retry gave the same payment with attempts 2 and `accepted_by_simulator`, still one record. A second retry gave 409.
     - Disabled gave 503 `SIMULATION_DISABLED`, and `PAYMENT_MODE=real` failed closed with 503.
+- **Post-approval invoice match (added later):** 6 API tests and 1 UI test.
+  - They cover match → eligible → 201, re-match refused after payment, INV-5002/INV-4987 still blocked, role/404/422/409 rules, and a tampered match giving `APPROVAL_STALE`.
+  - The full suite gave **767 passed**.
+  - Confirmed on a real ticket: REQ-20261017-B3227AC9 (approved without an invoice) was matched with INV-5001, then simulated: `accepted_by_simulator`, ₹76,125.00, `money_transferred: false`.
 - **Live UI** (Streamlit AppTest against the real API): **10/10 checks** — banner, approved ticket listed, Eligible ₹76,125.00, confirmation text, button disabled until confirmed, receipt "Accepted by simulator" and `PAY-SIM-` ref, disclaimer, no "Paid" or success badge, exactly one record, approver read-only.

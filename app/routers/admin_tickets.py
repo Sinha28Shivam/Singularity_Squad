@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Path, Query
+from pydantic import BaseModel, Field
 
 from app.auth.deps import require_admin
 from app.portal_schemas import AdminTicketView, DecisionIn, NoteIn, RunIn, TicketStatus, UserPublic
@@ -34,6 +35,18 @@ def run(body: Optional[RunIn] = None, ticket_id: str = Path(..., pattern=TICKET_
         admin: UserPublic = Depends(require_admin)) -> AdminTicketView:
     body = body or RunIn()
     return svc.to_admin_view(svc.run_ticket(ticket_id, admin, body.invoice_id, body.today), admin)
+
+
+class InvoiceMatchIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    invoice_id: str = Field(pattern=r"^INV-[A-Za-z0-9-]{1,32}$")
+
+
+@router.post("/tickets/{ticket_id}/invoice-match", response_model=AdminTicketView)
+def match_invoice(body: InvoiceMatchIn, ticket_id: str = Path(..., pattern=TICKET_ID_PATTERN),
+                  admin: UserPublic = Depends(require_admin)) -> AdminTicketView:
+    """Match an invoice that arrived after approval against the approved draft PO (no re-approval, no payment)."""
+    return svc.to_admin_view(svc.match_invoice_after_approval(ticket_id, admin, body.invoice_id), admin)
 
 
 @router.post("/tickets/{ticket_id}/decision", response_model=AdminTicketView)

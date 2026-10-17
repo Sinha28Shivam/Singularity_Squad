@@ -160,6 +160,13 @@ def set_status(ticket_id: str, status: str, *, expected: Optional[set[str]] = No
     return _conditional_update(ticket_id, expected, {"$set": fields}, db)
 
 
+def set_invoice_match(ticket_id: str, match: dict, *, expected: Optional[set[str]] = None,
+                      db: Optional[Database] = None) -> bool:
+    """Store a post-approval invoice match (separate from the immutable workflow_result snapshot)."""
+    return _conditional_update(ticket_id, expected,
+                               {"$set": {"invoice_match": match, "updated_at": _now()}}, db)
+
+
 def push_note(ticket_id: str, note: dict, *, db: Optional[Database] = None) -> bool:
     return _conditional_update(ticket_id, None, {"$push": {"notes": note}, "$set": {"updated_at": _now()}}, db)
 

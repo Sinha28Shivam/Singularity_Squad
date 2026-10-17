@@ -297,7 +297,8 @@ class FakeBackend:
     def admin_view(self, t):
         view = {k: t.get(k) for k in ("ticket_id", "status", "owner_username", "owner_name", "owner_email",
                                       "submission", "raw_text", "workflow_result", "notes", "decision",
-                                      "run_count", "last_run_by", "error", "created_at", "updated_at")}
+                                      "run_count", "last_run_by", "error", "created_at", "updated_at",
+                                      "invoice_match")}
         view["approval"] = self.ticket_approval_view(t["ticket_id"], self.users["admin"])
         return view
 

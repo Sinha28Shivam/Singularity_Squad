@@ -186,5 +186,6 @@ class AdminTicketView(BaseModel):
     approval: Optional[dict] = None                # current approval request + history (Phase 2)
     policy_evaluation: Optional[dict] = None       # latest policy evaluation snapshot (Policy RAG)
     policy_status: Optional[dict] = None           # server-derived requirement flags (clarification AND block)
+    invoice_match: Optional[dict] = None           # invoice matched after approval (payments simulation)
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None
