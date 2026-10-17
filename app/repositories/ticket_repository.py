@@ -79,9 +79,11 @@ def mark_ticket_status(ticket_id: str, status: str, error: Optional[str] = None,
 
 
 def list_recent_tickets(limit: int = 20, *, db: Optional[Database] = None) -> list[dict]:
+    """Minimal ticket summaries. Request text is deliberately excluded (it may contain sensitive
+    details); the full text is only returned by get_ticket()."""
     limit = max(1, min(int(limit), 100))
     projection = {"_id": 0, "ticket_id": 1, "created_at": 1, "updated_at": 1, "status": 1,
-                  "raw_text": 1, "workflow_result.final_status": 1}
+                  "workflow_result.final_status": 1}
     try:
         cursor = _resolve_db(db).tickets.find({}, projection).sort("updated_at", DESCENDING).limit(limit)
         docs = list(cursor)
@@ -89,13 +91,11 @@ def list_recent_tickets(limit: int = 20, *, db: Optional[Database] = None) -> li
         raise PersistenceError() from exc
     out = []
     for d in docs:
-        raw = d.get("raw_text") or ""
         out.append({
             "ticket_id": d.get("ticket_id"),
             "created_at": d.get("created_at"),
             "updated_at": d.get("updated_at"),
             "status": d.get("status"),
-            "raw_text": raw[:120],
             "final_status": (d.get("workflow_result") or {}).get("final_status"),
         })
     return out

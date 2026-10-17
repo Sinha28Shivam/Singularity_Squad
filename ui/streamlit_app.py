@@ -688,7 +688,8 @@ def load_ticket(ticket_id: str) -> None:
     if isinstance(wr, dict) and wr:
         wr = dict(wr)
         wr.setdefault("ticket_id", loaded["ticket_id"])
-        wr.setdefault("persisted", True)
+        # Show the stored flag as-is; the backend only saves persisted=True after every write succeeded.
+        wr["persisted"] = bool(wr.get("persisted"))
         st.session_state["result"] = wr
         st.session_state["ticket_msg"] = ("success", f"Loaded ticket `{loaded['ticket_id']}` from the database.")
     else:

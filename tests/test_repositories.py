@@ -154,7 +154,8 @@ def test_list_recent_tickets_clamps_and_sorts(db):
     rows = list_recent_tickets(limit=1000, db=db)
     assert len(rows) == 100
     assert rows[0]["ticket_id"] == "REQ-104"
-    assert len(rows[0]["raw_text"]) == 120
+    assert "raw_text" not in rows[0]
+    assert set(rows[0]) == {"ticket_id", "created_at", "updated_at", "status", "final_status"}
     assert "_id" not in rows[0] and "final_status" in rows[0]
 
 

@@ -36,9 +36,15 @@ python -m uvicorn app.main:app --port 8000 --reload
 python -m streamlit run ui\streamlit_app.py
 #    UI: http://localhost:8501   (set WORKPLACEOPS_API if the API is not on 127.0.0.1:8000)
 
-# 6. Run tests. These use in-memory mongomock; tests/test_mongo_integration.py also uses
-#    local MongoDB in a throwaway database, and skips itself if MongoDB is not running.
+# 6. Run tests. Most use in-memory mongomock. test_mongo_integration.py and
+#    test_persistence_restart.py use local MongoDB in throwaway databases (dropped afterwards)
+#    and skip themselves if MongoDB is not running.
 python -m pytest -q
+
+# 7. Pre-commit checks
+git check-ignore -v .env      # must print the .env rule
+git ls-files .env             # must print nothing
+git diff --check
 ```
 
 **Demo:**
@@ -104,8 +110,13 @@ AI_Hackathon_2.0/
     ├── test_intake.py, test_policy.py, test_vendor_procurement.py, test_billing.py, test_workflow.py
     ├── test_repositories.py     # repository behaviour on mongomock
     ├── test_api_persistence.py  # ticket endpoints, 404/422/503, disabled mode, invoice outcomes
-    └── test_mongo_integration.py# real local MongoDB: indexes + duplicate-key behaviour
+    ├── test_persistence_failures.py # failure at each write stage, retry idempotency, no secret leaks
+    ├── test_ui_tickets.py       # Streamlit AppTest: load ticket shows the stored persisted flag, 404/503
+    ├── test_mongo_integration.py# real local MongoDB: indexes + duplicate-key behaviour
+    └── test_persistence_restart.py # real MongoDB + 2 real uvicorn processes: survives API restart
 ```
+
+Also at the repo root: `.gitattributes` (LF line endings). All text files are saved as UTF-8 **without a BOM**, so `.gitignore` and `.env.example` parse correctly.
 
 ### How files depend on each other (imports and I/O)
 
@@ -210,15 +221,14 @@ flowchart TD
     end
 
     C -->|workflow exception| EF["mark_ticket_status('failed')<br/>re-raise"]
-    K --> P1["5. result.model_dump(mode='json')<br/>6. update_ticket_result(status = final_status)"]
-    P1 --> P2{"7. draft PO exists?"}
-    P2 -->|yes| P3["upsert_draft_po() keyed by po_id"]
+    K --> P2{"5. persist_result()<br/>draft PO exists?"}
+    P2 -->|yes| P3["6. upsert_draft_po() keyed by po_id"]
     P2 -->|no| P4
-    P3 --> P4["8. append_audit_entries() (sequence = step)"]
-    P4 --> P5["persisted = True"]
-    P1 & P3 & P4 -->|DB error| PE["mark_ticket_status('persistence_error')<br/>raise PersistenceError"]
-    PE --> E503["HTTP 503 {detail: safe message}<br/>(no URI / trace)"]
-    P5 --> R([9. Return WorkflowResult + ticket_id])
+    P3 --> P4["7. append_audit_entries() (sequence = step)"]
+    P4 --> P5["8. result.persisted = True<br/>update_ticket_result(snapshot, final_status)<br/><b>commit point</b>"]
+    P3 & P4 & P5 -->|DB error| PE["persisted = False<br/>mark_ticket_status('persistence_error')<br/>raise PersistenceError"]
+    PE --> E503["HTTP 503 {detail: safe message}<br/>(no URI / credentials / trace)"]
+    P5 --> R([9. Return the same WorkflowResult that was stored])
 ```
 
 ### Persistence steps (spec §9)
@@ -229,16 +239,35 @@ flowchart TD
 | 2 | `_ensure_indexes_once()` → `ensure_indexes()` | all | idempotent; covers the case where startup ran while MongoDB was down |
 | 3 | `create_ticket()` | `tickets` | `status="received"`, `workflow_result=None` |
 | 4 | `run_workflow(..., request_id=ticket_id)` | – | agents run in memory exactly as before |
-| 5–6 | `update_ticket_result()` | `tickets` | full JSON snapshot of `WorkflowResult`, `status=final_status` |
-| 7 | `upsert_draft_po()` | `purchase_orders` | only if a PO exists; upsert by `po_id`; rejects non-`draft` status |
-| 8 | `append_audit_entries()` | `agent_logs` | `AuditEntry.step` → `sequence`. A retry with identical content is ignored; different content raises `AuditConflictError`. Existing events are never overwritten. |
-| 9 | return | – | `ticket_id`, `persisted=True` |
+| 5 | `persist_result(ticket_id, result)` | – | runs steps 6–8; safe to retry for the same ticket |
+| 6 | `upsert_draft_po()` | `purchase_orders` | only if a PO exists; upsert by `po_id`; rejects non-`draft` status |
+| 7 | `append_audit_entries()` | `agent_logs` | `AuditEntry.step` → `sequence`. A retry with identical content is ignored; different content raises `AuditConflictError`. Existing events are never overwritten. |
+| 8 | `update_ticket_result()` | `tickets` | **Commit point.** Saves the full JSON snapshot with `persisted=True` and `status=final_status`, only after steps 6–7 succeeded. |
+| 9 | return | – | the same object that was stored: response and saved snapshot agree |
+
+**Why the ticket update comes last:**
+
+- The ticket snapshot is written after the PO and audit writes. So `workflow_result.persisted == true` in MongoDB always means every required write succeeded.
+- The API response is the same object, so the two never disagree.
+- The UI shows the stored flag as-is and never forces it to `true`.
 
 **Failure policy (`WORKPLACEOPS_PERSISTENCE=required`):**
 
-- A failed database write never returns success. The API returns `503` with a safe message, and logs only the ticket ID and the error class.
-- Writes are not atomic across collections. If a write fails after `create_ticket`, the ticket is left as `persistence_error`. If the workflow itself raises, the ticket is left as `failed`.
-- A transaction or outbox pattern could make this atomic in a later phase.
+- A failed database write never returns success. The API returns `503` with a safe message, and the response has no `persisted` field.
+- The server logs only the ticket ID and the error class: never the request text, the URI or credentials.
+- Writes are **not atomic** across collections:
+
+| Fails at | API | Ticket left as | Partial data that may exist |
+|---|---|---|---|
+| `create_ticket` | 503 | (no ticket) | nothing |
+| workflow exception | error | `failed`, `workflow_result=null` | nothing else |
+| `upsert_draft_po` | 503 | `persistence_error`, `workflow_result=null` | nothing else |
+| `append_audit_entries` | 503 | `persistence_error`, `workflow_result=null` | draft PO (and possibly some audit events) |
+| `update_ticket_result` | 503 | `persistence_error`, `workflow_result=null` | draft PO + all audit events |
+
+- Partial data can be found by `ticket_id`.
+- Calling `persist_result()` again for the same ticket completes it without duplicating the PO, the audit sequence or the ticket. This is covered by `test_retry_does_not_duplicate`.
+- A transaction or outbox pattern is planned for a later reliability phase. **Nothing claims atomicity today.**
 
 ### Demo invoice binding
 
@@ -275,15 +304,17 @@ sequenceDiagram
     O->>AG: intake → policy → vendor_matcher → procurement → billing → critic
     AG-->>O: EventRequest, PolicyReport, VendorMatchResult, ProcurementResult, ReconciliationReport, CriticReport
     O-->>SVC: WorkflowResult (+ audit_trail)
-    SVC->>RP: update_ticket_result(result_json, final_status)
-    RP->>DB: tickets.update_one
+    Note over SVC: persist_result()
     opt draft PO created
         SVC->>RP: upsert_draft_po(ticket_id, po)
         RP->>DB: purchase_orders.update_one(upsert, key po_id)
     end
     SVC->>RP: append_audit_entries(ticket_id, audit_trail)
     RP->>DB: agent_logs.insert_many(ordered=False)
-    SVC-->>API: WorkflowResult(ticket_id, persisted=True)
+    SVC->>SVC: result.persisted = True
+    SVC->>RP: update_ticket_result(snapshot, final_status)  (commit point)
+    RP->>DB: tickets.update_one
+    SVC-->>API: same WorkflowResult (ticket_id, persisted=True)
     API-->>UI: 200 JSON (or 503 if any write failed)
     UI-->>U: ticket ID + pipeline + tabs
 
@@ -351,7 +382,7 @@ flowchart LR
 | GET | `/api/samples` | `load_json()` | demo prompts |
 | GET | `/api/invoices` | `billing.load_invoices()` | invoice summaries |
 | POST | `/api/workflow` | `ticket_service.run_and_persist()` | `WorkflowResult` with `ticket_id`, `persisted`; `503` on DB failure |
-| GET | `/api/tickets?limit=20` | `list_recent_tickets()` (limit 1–100) | `{tickets: [...]}` |
+| GET | `/api/tickets?limit=20` | `list_recent_tickets()` (limit 1–100) | `{tickets: [{ticket_id, created_at, updated_at, status, final_status}]}`. Request text is deliberately excluded; the full text comes only from the single-ticket endpoint. |
 | GET | `/api/tickets/{ticket_id}` | `get_ticket()` | ticket + `workflow_result`; `404` / `422` / `503` |
 | GET | `/api/tickets/{ticket_id}/audit?limit=500` | `get_ticket()`, `get_audit_entries()` (limit 1–500) | `{ticket_id, events}` sorted by `sequence`; `404` / `422` / `503` |
 | POST | `/api/reconcile` | `bind_demo_documents()`, `billing.reconcile()` | `ReconciliationReport` (`404` if invoice unknown) |
@@ -360,6 +391,21 @@ flowchart LR
 
 - On startup, `ping_database()` and `ensure_indexes()` run. If MongoDB is down, the API still starts: `/api/health` reports `unavailable` and write requests return `503`.
 - On shutdown, `close_client()` runs.
+
+A startup failure is visible in two places:
+
+- The logs show `MongoDB ping failed: ServerSelectionTimeoutError` and `MongoDB not reachable at startup ... will return 503`.
+- `/api/health` shows `"database": "unavailable"`.
+
+Neither includes the URI or credentials; this was verified with a URI containing a username and password.
+
+**Configuration checklist:**
+
+- Keep `WORKPLACEOPS_PERSISTENCE=required` for a persistence demo.
+- Use `disabled` only for intentional non-persistent development; the UI then labels results "Not persisted".
+- Give the database user permissions only on the application database.
+- On Atlas, restrict network access and URL-encode special characters in the username and password.
+- Never commit `.env`, database dumps or credentials. `.gitignore` covers `.env` and `.env.*`, with an exception for `!.env.example`.
 
 ---
 
@@ -377,6 +423,8 @@ flowchart LR
 ```
 
 The UI shows a clear message for each error: `404` ("Ticket not found"), `422` ("Invalid ticket ID format"), `503` (the backend's message), and a backend-down hint if the API can't be reached. It never shows a traceback.
+
+**Load ticket** shows the stored `workflow_result.persisted` value exactly as saved. The banner reads "Loaded from database" with the ticket status. The recent-tickets dropdown shows only the ticket ID and status, never the request text.
 
 ---
 
@@ -403,6 +451,19 @@ The UI shows a clear message for each error: `404` ("Ticket not found"), `422` (
 | `test_workflow.py` | Orchestrator end-to-end + original API endpoints |
 | `test_repositories.py` | Serialization, `None` for unknown tickets, audit order, duplicate and conflict events, PO upsert idempotency, draft-only rule, error mapping, no `_id` |
 | `test_api_persistence.py` | Unique ticket IDs, retrieval, audit order, 404/422/503, `persistence_error` marking, disabled mode, no PO when over budget, invoice outcomes unchanged with unique IDs |
+| `test_persistence_failures.py` | Failure at create / PO / audit / ticket-update stages returns a safe 503 and leaves the ticket as `persistence_error` with no snapshot. Also: partial state can be diagnosed, a retry doesn't duplicate data, logs leak no credentials or request text, and the success snapshot equals the response. |
+| `test_ui_tickets.py` | Streamlit AppTest: a loaded ticket shows the stored `persisted` value (true or false); 404 and 503 messages; recent tickets work without request text |
 | `test_mongo_integration.py` | Real local MongoDB: index names and uniqueness, duplicate-key behaviour (skipped if MongoDB is down) |
+| `test_persistence_restart.py` | **Acceptance test.** Real MongoDB in a unique throwaway database, against real uvicorn process #1, then process #2. Submits a ticket, restarts, and checks the ticket, snapshot, draft PO and audit history are identical. Also checks that an over-budget ticket stores no PO. Skips if MongoDB is unavailable. |
 
-`conftest.py` gives each test a fresh in-memory `mongomock` client and forces offline LLM mode, so the suite needs no network. Tests marked `real_mongo` use a real local database instead.
+- `conftest.py` gives each test a fresh in-memory `mongomock` client and forces offline LLM mode.
+- Tests marked `real_mongo` use a real local MongoDB instead, in a uniquely named database that is dropped afterwards. They never touch the default `workplaceops` database.
+
+### Phase 1 verification record (2026-10-17)
+
+- `python -m pytest -q`: **86 passed**, including the real-MongoDB restart acceptance test.
+- Manual live run with the LLM enabled, port 8010, throwaway database: all 6 scenarios returned the expected status. Each response and its stored snapshot both had `persisted=true`.
+- After an API restart, all 6 tickets and their audit histories (sequences in order) reloaded. There were 3 draft POs, all `draft`, with no duplicate POs or audit sequences.
+- In Streamlit against the restarted API, Load ticket and Load audit showed the saved result and 10 events, and an unknown ticket showed "Ticket not found."
+- With a database URI containing a username and password, pointed at a dead port: health showed `unavailable`, workflow returned `503`, and neither the responses nor the logs contained the credentials.
+- `.env` is ignored and untracked, there are no BOMs or garbled characters, and `git diff --check` is clean.

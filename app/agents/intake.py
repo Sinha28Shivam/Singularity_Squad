@@ -1,4 +1,4 @@
-﻿"""Intake agent: turns a free-text event request into a structured EventRequest.
+"""Intake agent: turns a free-text event request into a structured EventRequest.
 
 An LLM (if configured) is tried first, but a deterministic regex parser always runs and wins on
 numeric fields to avoid hallucinated values. Missing mandatory fields are never guessed.

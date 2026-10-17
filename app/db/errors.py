@@ -1,4 +1,4 @@
-﻿"""Persistence-layer exceptions. Messages must be safe to show to API clients (no URIs/credentials)."""
+"""Persistence-layer exceptions. Messages must be safe to show to API clients (no URIs/credentials)."""
 
 
 class PersistenceError(Exception):

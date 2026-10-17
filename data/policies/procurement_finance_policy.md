@@ -1,4 +1,4 @@
-﻿# Procurement & Finance Policy (SYNTHETIC - for demo only)
+# Procurement & Finance Policy (SYNTHETIC - for demo only)
 
 ## PROC-2.1 Approved vendors only
 Goods and services for workplace events must be purchased only from vendors on the approved vendor list. Non-approved vendors must not be used, regardless of price.

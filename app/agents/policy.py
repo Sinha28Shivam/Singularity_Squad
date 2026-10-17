@@ -1,4 +1,4 @@
-﻿"""Policy agent: loads structured rules + markdown clauses, retrieves clauses with a local BM25,
+"""Policy agent: loads structured rules + markdown clauses, retrieves clauses with a local BM25,
 and evaluates an EventRequest deterministically. The LLM is only used to phrase the summary."""
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-﻿# Workplace Event Policy (SYNTHETIC - for demo only)
+# Workplace Event Policy (SYNTHETIC - for demo only)
 
 ## EVT-2.2 Lead time for event requests
 Employee event requests that involve external catering must be submitted at least 5 business days before the event date. Requests with shorter lead time require written approval from the Department Head and are flagged for human review.

@@ -1,8 +1,12 @@
 """Ticket service: runs the multi-agent workflow and persists ticket, draft PO and audit trail.
 
-Persistence is not atomic across collections. If a write fails after the ticket was created,
-the ticket is left with status ``persistence_error`` (or ``failed`` if the workflow itself raised)
-and the caller receives a PersistenceError (HTTP 503) instead of a success response.
+Write order: create ticket (status ``received``) -> run workflow -> upsert draft PO -> append audit
+events -> update ticket with the final snapshot (``persisted=True``). The last write is the commit point.
+
+Persistence is NOT atomic across collections. If a write fails after the ticket was created, the
+ticket is left with status ``persistence_error`` (or ``failed`` if the workflow itself raised), its
+``workflow_result`` stays empty, and the caller receives a PersistenceError (HTTP 503). A PO or some
+audit events may already exist for that ticket; they are diagnosable via ``ticket_id``.
 """
 from __future__ import annotations
 
@@ -86,17 +90,32 @@ def run_and_persist(text: str, today: Optional[date] = None,
 
     result.ticket_id = ticket_id
     try:
-        updated_at = _now()
-        update_ticket_result(ticket_id, result.model_dump(mode="json"), result.final_status, updated_at)
-        if result.procurement and result.procurement.po:
-            upsert_draft_po(ticket_id, result.procurement.po, updated_at)
-        append_audit_entries(ticket_id, result.audit_trail)
+        persist_result(ticket_id, result)
     except Exception as exc:
+        result.persisted = False
         logger.error("Persistence failed for ticket %s (%s)", ticket_id, type(exc).__name__)
         _mark_best_effort(ticket_id, "persistence_error", f"Persistence error: {type(exc).__name__}")
         if isinstance(exc, PersistenceError):
             raise
         raise PersistenceError(_PERSIST_FAILED_MSG) from exc
-
-    result.persisted = True
     return result
+
+
+def persist_result(ticket_id: str, result: WorkflowResult) -> None:
+    """Write draft PO and audit trail, then commit the ticket snapshot with persisted=True.
+
+    The ticket update is the commit point: the stored snapshot only says persisted=True once every
+    required write succeeded, so the API response and the stored document always agree. Each write is
+    idempotent (PO upsert by po_id; identical audit events are ignored), so retrying this function for
+    the same ticket does not duplicate the PO or audit sequence.
+    """
+    updated_at = _now()
+    if result.procurement and result.procurement.po:
+        upsert_draft_po(ticket_id, result.procurement.po, updated_at)
+    append_audit_entries(ticket_id, result.audit_trail)
+    result.persisted = True
+    try:
+        update_ticket_result(ticket_id, result.model_dump(mode="json"), result.final_status, updated_at)
+    except Exception:
+        result.persisted = False
+        raise
