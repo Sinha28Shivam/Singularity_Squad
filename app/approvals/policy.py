@@ -30,9 +30,69 @@ def _num(value: Any) -> Optional[float]:
         return None
 
 
-def evaluate_approval_requirement(workflow_result: dict, policy: Optional[dict] = None) -> ApprovalRequirement:
+POLICY_RAG_REASON_CODES = ("POLICY_REVIEW_REQUIRED", "RATE_CARD_MISMATCH", "RATE_CARD_UNVERIFIED",
+                           "POLICY_CONFLICT", "INSUFFICIENT_POLICY_EVIDENCE", "POLICY_RETRIEVAL_DEGRADED")
+_RAG_TEXTS_CACHE: dict[str, str] = {}
+
+
+def _rag_reason_text(code: str) -> str:
+    if not _RAG_TEXTS_CACHE:
+        try:
+            from app.policy_rag.embeddings import load_config
+            _RAG_TEXTS_CACHE.update(load_config().get("approval_reason_texts") or {})
+        except Exception:  # noqa: BLE001 - fall back to the code itself
+            pass
+    return str(_RAG_TEXTS_CACHE.get(code, code))
+
+
+def _apply_policy_evaluation(req: ApprovalRequirement, evaluation: dict) -> ApprovalRequirement:
+    """Merge a Policy RAG evaluation into a requirement. Can only ADD reason codes, raise risk or turn the
+    request into a hard block (explicit ``hard_block`` findings); it never clears a block, a review
+    requirement or a clarification request, and never approves anything."""
+    if not isinstance(evaluation, dict):
+        raise ValueError("policy_evaluation must be a dict")
+    raw_codes = evaluation.get("approval_reason_codes") or []
+    blocking = [str(b) for b in evaluation.get("blocking_findings") or []]
+    if not isinstance(raw_codes, list):
+        raise ValueError("approval_reason_codes must be a list")
+    added = [c for c in POLICY_RAG_REASON_CODES if c in raw_codes]
+    codes, reasons = list(req.reason_codes), list(req.reasons)
+    facts = dict(req.facts)
+    facts["policy_evaluation"] = {"evaluation_id": evaluation.get("evaluation_id"),
+                                  "evaluation_hash": evaluation.get("evaluation_hash"),
+                                  "outcome": evaluation.get("outcome"),
+                                  "rule_set_version": evaluation.get("rule_set_version")}
+    if req.needs_clarification:
+        return req.model_copy(update={"facts": facts})
+    for c in added:
+        if c not in codes:
+            codes.append(c)
+            reasons.append(_rag_reason_text(c))
+    update: dict[str, Any] = {"reason_codes": codes, "reasons": reasons, "facts": facts}
+    if blocking and not req.blocked:
+        update.update({"required": False, "blocked": True, "risk_level": "high"})
+        codes[:0] = ["HARD_BLOCK", "POLICY_HARD_BLOCK"]
+        reasons[:0] = ["A policy rule hard-blocks this request; ordinary approval cannot override it.",
+                       f"Blocking policy findings: {', '.join(blocking)}"]
+    elif req.required and added and req.risk_level == "low":
+        update["risk_level"] = "medium"
+    return req.model_copy(update=update)
+
+
+def evaluate_approval_requirement(workflow_result: dict, policy: Optional[dict] = None,
+                                  policy_evaluation: Optional[dict] = None) -> ApprovalRequirement:
     """Decide whether a human approval request is required. Raises on malformed input: callers must
-    fail closed (no approval request, ticket not reported as approved)."""
+    fail closed (no approval request, ticket not reported as approved).
+
+    ``policy_evaluation`` (a PolicyEvaluationResult as JSON) may only add reason codes / raise risk / add an
+    explicit hard block; when None the behaviour is exactly the pre-RAG behaviour."""
+    req = _evaluate_base(workflow_result, policy)
+    if policy_evaluation is None:
+        return req
+    return _apply_policy_evaluation(req, policy_evaluation)
+
+
+def _evaluate_base(workflow_result: dict, policy: Optional[dict]) -> ApprovalRequirement:
     if policy is None:
         from app.approvals.service import load_policy
         policy = load_policy()
@@ -109,6 +169,8 @@ def evaluate_approval_requirement(workflow_result: dict, policy: Optional[dict] 
                                risk_level=risk, amount=total, currency=currency, facts=facts, **base)
 
 
+# Transient key on the ticket dict handed to on_workflow_completed (never persisted on the ticket).
+POLICY_BINDING_KEY = "_policy_evaluation_binding"
 _REQUEST_FIELDS = ("date", "attendees", "budget_limit", "service", "location")
 _PO_FIELDS = ("po_id", "vendor_id", "vendor_name", "line_items", "subtotal", "tax", "total", "currency",
               "required_approver")
@@ -133,6 +195,11 @@ def review_snapshot(workflow_result: dict, ticket: dict) -> dict:
     if reconciliation is not None:
         snap["reconciliation"] = {"invoice_id": reconciliation.get("invoice_id"),
                                   "status": reconciliation.get("status")}
+    binding = ticket.get(POLICY_BINDING_KEY)
+    if isinstance(binding, dict) and binding.get("evaluation_hash"):
+        # Binds the decision to the exact policy evidence version (covered by snapshot_hash).
+        snap["policy_evaluation"] = {k: binding.get(k) for k in
+                                     ("evaluation_id", "evaluation_hash", "rule_set_version", "documents_used")}
     # Round-trip through JSON so the stored snapshot equals what was hashed.
     return json.loads(json.dumps(snap, sort_keys=True, default=str))
 

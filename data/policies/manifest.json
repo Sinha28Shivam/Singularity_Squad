@@ -1,0 +1,10 @@
+{
+  "documents": [
+    {"filename": "Company Policy.pdf", "document_type": "company_policy",
+     "logical_key": "company-conduct-policy", "version_label": "2.1"},
+    {"filename": "Vander Policy.pdf", "document_type": "vendor_policy",
+     "logical_key": "event-vendor-venue-policy", "version_label": "1.0"},
+    {"filename": "Vander Manu.pdf", "document_type": "rate_card",
+     "logical_key": "synthetic-event-menu", "version_label": "SINGULARITY-RAG-MENU"}
+  ]
+}

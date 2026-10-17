@@ -95,3 +95,11 @@ __all__ += [
     "set_reconciliation",
     "transition_if_pending",
 ]
+
+from app.repositories import evidence_snapshot_repository, rate_card_repository  # noqa: E402
+
+__all__ += ["evidence_snapshot_repository", "rate_card_repository"]
+
+from app.repositories import policy_chunk_repository, policy_document_repository  # noqa: E402
+
+__all__ += ["policy_chunk_repository", "policy_document_repository"]

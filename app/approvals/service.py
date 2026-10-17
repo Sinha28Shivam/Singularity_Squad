@@ -491,6 +491,17 @@ def approval_counts(viewer: UserPublic) -> dict[str, int]:
     return repo.count_approvals_by_status(requester_id=requester)
 
 
+def _policy_evaluation_for(ticket: dict) -> Optional[dict]:
+    """Evidence snapshot of the ticket's current run, so the displayed requirement matches the one the
+    approval request was created from. Missing snapshot (RAG disabled / legacy run) -> None."""
+    run_count = int(ticket.get("run_count") or 0)
+    if not run_count:
+        return None
+    from app.repositories import evidence_snapshot_repository
+    snap = evidence_snapshot_repository.get_for_run(ticket["ticket_id"], run_count)
+    return snap.get("evaluation") if snap and isinstance(snap.get("evaluation"), dict) else None
+
+
 def ticket_approval_view(ticket_id: str, viewer: UserPublic, now: Optional[datetime] = None,
                          ticket: Optional[dict] = None) -> TicketApprovalView:
     """Current request + version history. Visible to the ticket owner, approvers and admins (else 404)."""
@@ -502,7 +513,8 @@ def ticket_approval_view(ticket_id: str, viewer: UserPublic, now: Optional[datet
     requirement = None
     if ticket.get("workflow_result"):
         try:
-            requirement = evaluate_approval_requirement(ticket["workflow_result"])
+            requirement = evaluate_approval_requirement(ticket["workflow_result"],
+                                                        policy_evaluation=_policy_evaluation_for(ticket))
         except Exception as exc:  # noqa: BLE001 - view only; never treated as "approval not needed"
             logger.warning("Approval policy evaluation failed for ticket %s (%s)", ticket_id, type(exc).__name__)
     return TicketApprovalView(ticket_id=ticket_id, requirement=requirement,

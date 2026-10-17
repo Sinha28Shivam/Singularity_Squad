@@ -9,6 +9,7 @@ This document covers:
 - How each run is saved to MongoDB (Phase 1).
 - The role-based portal: users submit tickets and the admin runs the workflow (section 10).
 - Phase 2 approval safety: approvers decide versioned approval requests, with separation of duties (section 11).
+- Phase 2 policy RAG: a multi-PDF policy library, cited evidence, rate cards and evidence snapshots that feed approvals (section 12).
 
 All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or payment. Saving a draft PO to the database does **not** approve or issue it.
 
@@ -873,3 +874,227 @@ sequenceDiagram
   - Approver: the queue showed counts by status, the detail showed the safety notice and the "Draft — no order placed, nothing paid" label, and history read "Approved by `approver` (approver) at … — 'Within policy.'".
   - "Continue to confirmation" sent nothing; Confirm stayed disabled until the checkbox was ticked; after confirming, the server status was `approved`.
   - The admin console had no Approve button and the user portal had no decision controls, with no exceptions on any page.
+
+---
+
+## 12. Phase 2: policy RAG, multi-PDF library and rate cards (spec `Docs/PHASE_2_POLICY_RAG_AND_APPROVAL_IMPLEMENTATION.md`)
+
+**Design rule:**
+
+1. RAG finds the evidence.
+2. Structured extraction supplies candidate facts.
+3. Deterministic code (`Decimal`) validates amounts and enforces rules.
+4. A human approver decides.
+
+Nothing places an order or a payment. The existing Markdown policy agent (`app/agents/policy.py`) is unchanged. The PDF library adds a second, cited evidence layer next to it.
+
+### 12.1 Modules
+
+```text
+app/policy_rag/
+  schemas.py      PolicyDocument, PolicyChunk, PolicyEvidence, PolicyFinding, RateCardEntry, RateQuote,
+                  RateValidationResult, PolicyEvaluationResult, EvidenceSnapshot (+ enums)
+  storage.py      PDF bytes in POLICY_STORE_DIR (default data/policy_store, git-ignored); paths never exposed
+  pdf_extract.py  pypdf page-aware extraction, low-text page detection, letter-spacing normalization, typed errors
+  chunking.py     page-bounded chunks (~450 tokens, 60 overlap) with detected section headings
+  embeddings.py   OpenAIEmbedder (text-embedding-3-small via API_KEY) | LocalHashEmbedder (offline, 512-d)
+  ingestion.py    ingest_bytes / ingest_batch / seed_from_directory / reprocess / archive; versioning + supersede
+  retrieval.py    access + applicability filters -> BM25 + cosine -> reciprocal-rank fusion -> cited evidence
+  rate_cards.py   extract_rate_entries (menu tables -> Decimal rows, all needs_review), verify_entry, validate_quote
+  evaluation.py   evaluate_ticket -> findings with evidence_ids, outcome, approval_reason_codes, evaluation_hash
+  events.py       append-only policy_events (no document text)
+  errors.py       PolicyRagError(status_code, detail) -> safe JSON
+app/routers/policy_documents.py   /api/policy-documents...
+app/routers/policy_search.py      /api/policy/search, /api/policy/validate-rate, /api/requests/{id}/..., /api/rate-cards...
+app/repositories/policy_document_repository.py, policy_chunk_repository.py, rate_card_repository.py,
+                 evidence_snapshot_repository.py
+data/policy_rag_config.json        rule_set_version, limits, chunking, embedding model, tolerance, vendor key maps, review topics
+data/policies/manifest.json        document types / logical keys / versions of the seeded PDFs
+ui/pages_portal/policy_library.py  Upload · Inventory · Search · Rate cards
+ui/lib/policy_render.py            evidence panel (outcome badges, findings, citations, rate table, hash)
+```
+
+### 12.2 Ingestion pipeline (per file, independent within a batch)
+
+```mermaid
+flowchart LR
+    U[Admin uploads N PDFs<br/>POST /api/policy-documents/upload<br/>files + metadata JSON list] --> V{validate<br/>.pdf + %PDF- magic<br/>size, pages, encryption}
+    V -->|fail| F[DocumentUploadResult ok=false<br/>error_code: not_pdf / corrupt / encrypted / too_large / too_many_pages]
+    V --> H[sha256 content hash]
+    H -->|same hash, not archived| D[ok=true, duplicate_of=doc_id<br/>nothing re-ingested]
+    H --> S[store bytes: doc_id.pdf]
+    S --> X[extract pages pypdf<br/>low-text pages flagged]
+    X --> C[page-bounded chunks + sections]
+    C --> E[embed chunks<br/>OpenAI or local hash]
+    E --> I[policy_chunks indexed]
+    I --> R{document_type == rate_card?}
+    R -->|yes| RC[extract rate rows<br/>Decimal, needs_review]
+    R -->|no| ST
+    RC --> ST{status}
+    ST -->|ok| READY[ready]
+    ST -->|"low text > 30% / no chunks"| NR[needs_review]
+    ST -->|image-only| OCR[needs_ocr]
+    READY --> VS[previous version of same logical_key -> superseded<br/>never overwritten]
+```
+
+**Pipeline rules:**
+
+- **Server-set fields:** `uploaded_by`, `status`, the hash and `document_id` are set by the server. Metadata uses `extra="forbid"`, so a smuggled `uploaded_by` gets `422`, and so does an effective range that ends before it starts.
+- **Untrusted text:** PDF text is treated as data. LLM prompts wrap excerpts as quoted data, and LLM output is advisory only (`source: "llm"`); it never changes an outcome.
+- **Events:** `document_uploaded`, `document_validation_failed`, `document_extraction_completed`, `document_indexing_completed`, `document_marked_needs_review`, `document_version_superseded`, `document_archived`, `rate_card_extraction_created`, `rate_card_verified`, `policy_evaluation_completed` and `policy_conflict_detected`.
+- **Seeding:** at startup (`POLICY_RAG_SEED`, default on), PDFs in `data/policies` are ingested by manifest, matched by content hash so a restart never re-ingests them.
+
+### 12.3 Retrieval
+
+1. **Filters first:**
+   - Status `ready` only. Archived, superseded, `needs_review` and `needs_ocr` documents are excluded unless `include_historical` is set.
+   - The `as_of` date must fall within the effective dates.
+   - Vendor applicability: a chunk is used if its vendor matches the query vendor, or if it has no vendor (company-wide). Another vendor's documents are never used.
+2. **BM25 and cosine:** BM25 runs over the filtered chunks, and cosine similarity runs on the vectors (only when the query and chunk embedding models match).
+3. **Fusion:** reciprocal-rank fusion, then deduplication.
+4. **Results:** the top k come back with **real** scores and excerpts taken from the actual chunk text.
+
+`retrieval_mode` is `hybrid`, or `keyword_only_degraded` with a warning when no compatible vectors exist. If the best match is weak, or nothing matches, the result is `insufficient_evidence: true` and no citations are invented.
+
+### 12.4 Rate cards (structured, deterministic)
+
+- **Extraction:**
+  - Menu pages are split into vendor records: `Record: VEN-00x` maps to `vendor_key` `evt-ven-00x`.
+  - Event vendors are deliberately namespaced apart from the catering vendors (`cat-ven-00x`), and vendors are never matched by fuzzy name.
+  - Each package or add-on row becomes a `RateCardEntry`: `unit_rate` as a Decimal string (`₹1,45,000` → `145000.00`), the unit (event / person / serving / item), `tax_treatment` (`excluded` only when the page says so) and the source page.
+  - **Every row starts as `needs_review`.**
+- **Verification:** `POST /api/rate-cards/{id}/verify` (approver or admin) with `verify` or `reject`. A second decision gives `409`, and each decision is audited.
+- **Validation** (`POST /api/policy/validate-rate`):
+  - The vendor key and item code must match exactly, the quote date must fall in the validity window, and the currency and unit must match.
+  - The expected total is `rate × qty` in `Decimal`, compared within a ₹1.00 tolerance.
+  - Results:
+    - An unverified row gives `needs_review`.
+    - Several plausible verified rows give `conflict`.
+    - No row gives `unknown`.
+    - A wrong currency gives `needs_review`.
+  - Tax and surcharges are never invented.
+
+### 12.5 Ticket evaluation and approval binding
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Admin (Run workflow)
+    participant TS as ticket_service.run_ticket
+    participant WF as orchestrator + agents
+    participant EV as policy_rag.evaluation
+    participant RT as retrieval / rate_cards
+    participant SN as evidence_snapshot_repository
+    participant AP as approvals.policy + service
+
+    A->>TS: POST /api/admin/tickets/{id}/run
+    TS->>WF: run_workflow (unchanged)
+    WF-->>TS: WorkflowResult (persisted, ticket stays processing)
+    TS->>EV: evaluate_ticket(ticket, workflow_result)   [POLICY_RAG_ENABLED]
+    EV->>RT: queries from category/service/attendees/location/vendor
+    RT-->>EV: cited evidence (+ rate validation for evt- vendors)
+    EV-->>TS: PolicyEvaluationResult (findings, outcome, approval_reason_codes, evaluation_hash)
+    TS->>SN: create_snapshot (append-only, unique ticket_id+run_count)
+    Note over TS,SN: any exception here -> fail closed: existing 503, no approval request
+    TS->>AP: evaluate_approval_requirement(workflow_result, policy_evaluation=...)
+    AP-->>TS: requirement (policy codes ADDED, risk >= medium, blocks never removed)
+    TS->>AP: on_workflow_completed -> approval vN with review_snapshot.policy_evaluation {evaluation_id, evaluation_hash, rule_set_version, documents_used}
+```
+
+**Findings** (`PolicyFinding`): `category`, `severity` (info / warning / review_required / hard_block), `status` (pass / fail / unknown / conflict / not_applicable), `summary`, `reason`, `evidence_ids` (a subset of the returned evidence, checked in code), `rule_id` and `source`.
+
+**Initial rules (`policy-rag-rules-v1`):**
+
+| Rule | When | Result |
+|---|---|---|
+| Policy located | Applicable company/vendor evidence found | info · pass (cited) |
+| Vendor verification | A vendor is selected | **review_required** · unknown: facilities, licences and insurance must be verified (cited from the Event Vendor & Venue Policy) |
+| Safety review | Attendees ≥ 150 | review_required (cited) |
+| Privacy review | The request mentions personal data or photos | review_required (cited) |
+| Conflict | Overlapping verified rate rows, or conflicting thresholds without configured precedence (`precedence: []`) | conflict → review |
+| Rate card | Catering vendor (`cat-`) | `not_applicable` (catering has no rate card; never blocks) |
+| No evidence | Library empty or no relevant match | `INSUFFICIENT_POLICY_EVIDENCE` → review (never a pass) |
+
+**How the outcome feeds the approval:**
+
+- **Outcome:** `hard_block` if any finding is a hard block (none configured by default), `review_required` if any finding needs review or conflicts, `unknown` if there is no evidence, otherwise `pass`.
+- **Codes added to the approval request:** `POLICY_REVIEW_REQUIRED`, `RATE_CARD_MISMATCH`, `RATE_CARD_UNVERIFIED`, `POLICY_CONFLICT`, `INSUFFICIENT_POLICY_EVIDENCE` and `POLICY_RETRIEVAL_DEGRADED`.
+- **Limits:** RAG can never remove a hard block or a review requirement, and never approves.
+- **Version binding:** the approval's `review_snapshot` includes the evaluation hash. Changing the evidence changes `workflow_snapshot_hash`, so a stale decision gets `409`.
+- **Re-checking:** `POST /api/requests/{id}/evaluate-policy` (admin) re-evaluates without re-running the workflow and reports `stale_against_approval`. It never supersedes anything on its own.
+
+### 12.6 Policy RAG API
+
+| Method | Path | Who | Returns |
+|---|---|---|---|
+| POST | `/api/policy-documents/upload` | admin | `{results: [DocumentUploadResult]}`. Always `200` with per-file results; `413` if the batch is too large; `422` for bad metadata. |
+| GET | `/api/policy-documents?document_type=&vendor_key=&status=&logical_key=` | approver, admin | `{documents, counts}`: metadata only, never text or paths |
+| GET | `/api/policy-documents/{document_id}` | approver, admin | metadata + safe event history |
+| POST | `/api/policy-documents/{document_id}/reprocess` | admin | `{result, document}` |
+| POST | `/api/policy-documents/{document_id}/archive` | admin | `{document}` (excluded from search; audit kept) |
+| POST | `/api/policy/search` | approver, admin | `PolicySearchResult {query_id, evidence[], retrieval_mode, insufficient_evidence, warnings}` |
+| POST | `/api/policy/validate-rate` | approver, admin | `RateValidationResult` (Decimal strings) |
+| GET | `/api/rate-cards?vendor_key=&verification_status=` | approver, admin | `{rate_cards, count}` |
+| POST | `/api/rate-cards/{rate_id}/verify` | approver, admin | `{"decision": "verify" or "reject"}`; `409` if already decided |
+| POST | `/api/requests/{ticket_id}/evaluate-policy` | admin | `{evaluation, snapshot_created, stale_against_approval}` |
+| GET | `/api/requests/{ticket_id}/evidence` | admin/approver: full snapshot; owner: **redacted**; others `404` | The owner's view has finding summaries and citation labels (file, version, page, section), with no excerpts, hashes or scores. |
+
+Users (requesters) get `403` on the library, search and rate cards.
+
+**New collections and indexes:**
+
+- `policy_documents`: `document_id_unique`, `content_hash`, `type_status`, `vendor_type_status`, `effective_range`, `logical_key_version_unique`
+- `policy_chunks`: `chunk_id_unique`, `doc_page`, `chunk_status_type`
+- `rate_card_entries`: `rate_id_unique`, `rate_vendor_item_validity`, `rate_document`, `rate_verification`
+- `policy_evidence_snapshots`: `snapshot_ticket_run_unique`
+- `policy_events`: `policy_event_time`, `policy_event_document`
+
+### 12.7 UI
+
+**Policy library** (admin; approver read-only plus rate verification):
+
+- **Upload:** multiple PDFs with metadata per file, and results per file.
+- **Inventory:** status, version, effective dates and supersede/duplicate markers. Reprocess and archive need a confirmation tick.
+- **Search:** evidence cards (file · version · page · section · excerpt · score), the retrieval mode, a degraded warning and an insufficient-evidence message.
+- **Rate cards:** verify or reject each row, showing its source page.
+
+**Evidence panel** (admin ticket detail and approvals detail):
+
+- Outcome badges that distinguish pass, review required, hard block and unknown, plus each finding's status and severity.
+- Citations, the rate table, missing evidence, conflicts, and the hash prefix with the rule set version.
+- On approve, it shows exactly: "Approved internally — purchase order remains a draft; no order or payment has been executed."
+
+The user portal shows the redacted "Policy check" only.
+
+### 12.8 What changed for existing behaviour
+
+1. **Policy check on every portal run** (`POLICY_RAG_ENABLED`, default **on**):
+   - Approval requests now also carry `POLICY_REVIEW_REQUIRED`, or `INSUFFICIENT_POLICY_EVIDENCE` if the library is empty, and their risk is at least `medium`.
+   - Snapshot hashes include the evaluation binding, so they differ from Phase 2 approval-only hashes.
+2. **Failures:** if the policy check or saving its snapshot fails, the run takes the existing fail-closed `503` path and no approval request is created.
+3. **Ticket views gain two fields:** `policy_evaluation` (admin) and `policy_evidence` (requester, redacted).
+4. **Startup seeding:** the first start ingests the 3 PDFs in `data/policies`. With OpenAI embeddings this takes about 15 seconds; later starts skip them.
+5. **Tests:** `tests/conftest.py` defaults to `POLICY_RAG_ENABLED=0` and `POLICY_RAG_SEED=0` with a temporary `POLICY_STORE_DIR`, so the earlier 257 tests are unchanged. The new RAG tests opt in. The three real-uvicorn tests now also pass `POLICY_RAG_SEED=0` and a temporary store, so test runs never write into `data/policy_store`.
+6. **Unchanged:** the agents, catering costing, vendors.json, the legacy `/api/workflow`, auth, and every Phase 2 approval rule.
+
+### 12.9 Policy RAG verification record (2026-10-17)
+
+- `python -m pytest -q`: **350 passed** (257 earlier + 93 new). The new tests cover ingestion (23), retrieval (12), rate cards (9), evaluation (18), authorization (5), no external execution (2), UI (14), and real-MongoDB plus uvicorn acceptance (3, spec §18.6 and the real PDFs).
+- **Live run** (LLM and OpenAI embeddings on, throwaway database, seeding from your 3 real PDFs):
+  - **Seeding:** Company Policy 16 pages / 77 chunks, Vander Policy 10 / 26, Vander Manu 6 / 12 with **52 rate rows** across `evt-ven-001` to `evt-ven-006`. All three were `ready`, with 1536-dimension `text-embedding-3-small` vectors and no storage paths exposed.
+  - **Access:** users got `403` on the library and search.
+  - **Search:**
+    - "vendor insurance licenses verification" (hybrid): Vander Policy.pdf p. 3 § 5, p. 4 § 9, p. 5 § 9.1 and p. 10 § 10.
+    - "risk assessment first aid supervision": Company Policy p. 4 § 4.1, p. 11 § 11.4 / 11.6 and Vander Policy p. 4 § 6.3.
+    - A nonsense query gave `insufficient_evidence`.
+  - **Catering ticket with INV-5001:**
+    - The ticket became `pending_approval` and the evaluation came back `review_required` (hybrid). Vendor verification was cited from 3 real chunks, every evidence ID was valid, and catering was `not_applicable` for rate cards.
+    - The approval codes were `PO_REQUIRES_HUMAN_APPROVAL`, `AMOUNT_THRESHOLD` and `POLICY_REVIEW_REQUIRED` (medium). The bound hash matched the snapshot, and the requirement panel matched the stored request (a gap fixed during integration).
+    - The requester's evidence was redacted with no excerpts or hashes, and another user got `404`.
+    - The approver approved with the draft-only message, and a re-evaluation reported `stale_against_approval=false`.
+  - **Rate validation:**
+    - Before verification: `needs_review`. Verification: user `403`, approver `200`.
+    - Quote 42000 → `pass` (diff 0.00, source page 1). Quote 45500.50 → `fail` (diff 3500.50, 8.33%). USD currency → `needs_review`.
+  - **Mixed upload batch:** privacy_policy.pdf ok (`needs_review`, 1 of 2 pages low-text), broken.pdf → `corrupt`, notes.txt → `not_pdf`, and the real Vander Policy → `duplicate_of`. A reversed date range and a smuggled `uploaded_by` both gave `422`.
+  - **After an API restart:** still 3 documents (no re-seed), the ticket and approval `approved`, the snapshot hash unchanged, the verified rate row kept, and every PO `draft`.
+- **Real Streamlit pages against the live API:** the Policy library showed the Upload / Inventory / Search / Rate cards tabs with the real documents, and search returned 8 citations with file, version, page, section and excerpt. The admin ticket detail showed the evidence panel with the rule set version, and there were no exceptions.

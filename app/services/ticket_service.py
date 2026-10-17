@@ -17,10 +17,13 @@ from datetime import date, datetime, timezone
 from typing import Optional
 
 from app.approvals import service as approval_service
-from app.approvals.policy import evaluate_approval_requirement
+from app.approvals.policy import POLICY_BINDING_KEY, evaluate_approval_requirement
 from app.approvals.schemas import APPROVAL_SAFETY_NOTICE
 from app.db import PersistenceError, ensure_indexes, get_client, persistence_mode
 from app.orchestrator import run_workflow
+from app.policy_rag.evaluation import binding as policy_evaluation_binding
+from app.policy_rag.evaluation import evaluate_and_snapshot, policy_rag_enabled
+from app.policy_rag.evaluation import redact as redact_policy_evaluation
 from app.portal_schemas import (
     EVENT_CATEGORY_LABELS,
     RUNNABLE_STATUSES,
@@ -327,6 +330,20 @@ def run_ticket(ticket_id: str, admin: UserPublic, invoice_id: Optional[str] = No
         result.persisted = False
         _fail_run(ticket_id, exc)
 
+    policy_binding = None
+    if requirement is not None and policy_rag_enabled():
+        # Policy RAG runs on the persisted result (run_count is now final) and before the approval
+        # requirement is fixed. It can only add reasons / raise risk / hard-block; any failure fails closed.
+        try:
+            evaluation = evaluate_and_snapshot(_load(ticket_id), result.model_dump(mode="json"))
+            evaluation_json = evaluation.model_dump(mode="json")
+            requirement = evaluate_approval_requirement(result.model_dump(mode="json"),
+                                                        policy_evaluation=evaluation_json)
+            policy_binding = policy_evaluation_binding(evaluation_json)
+        except Exception as exc:  # noqa: BLE001 - fail closed below
+            logger.error("Policy RAG evaluation failed for ticket %s (%s)", ticket_id, type(exc).__name__)
+            requirement = None
+
     if requirement is None:
         try:
             approval_service.supersede_pending(ticket_id, "policy_unavailable")
@@ -342,7 +359,10 @@ def run_ticket(ticket_id: str, admin: UserPublic, invoice_id: Optional[str] = No
     else:
         new_status = "reviewed"
     try:
-        approval = approval_service.on_workflow_completed(_load(ticket_id), result.model_dump(mode="json"),
+        ticket_doc = _load(ticket_id)
+        if policy_binding is not None:
+            ticket_doc[POLICY_BINDING_KEY] = policy_binding
+        approval = approval_service.on_workflow_completed(ticket_doc, result.model_dump(mode="json"),
                                                           requirement)
         if new_status == "pending_approval" and not approval:
             raise PersistenceError("Approval request could not be created.")
@@ -570,6 +590,21 @@ def requester_approval(data: Optional[dict]) -> Optional[dict]:
     }
 
 
+def _latest_policy_evaluation(doc: dict) -> Optional[dict]:
+    """Latest stored PolicyEvaluationResult (JSON) for the ticket, or None. View-only: failures hide the panel."""
+    if not doc.get("run_count"):
+        return None
+    try:
+        from app.repositories import evidence_snapshot_repository
+        snap = evidence_snapshot_repository.get_latest(doc["ticket_id"])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Policy evidence unavailable for ticket %s (%s)", doc.get("ticket_id"), type(exc).__name__)
+        return None
+    if not snap or not isinstance(snap.get("evaluation"), dict):
+        return None
+    return {**snap["evaluation"], "snapshot_id": snap.get("snapshot_id")}
+
+
 def _owner_viewer(doc: dict) -> UserPublic:
     return UserPublic(username=doc.get("owner_username") or "", name=doc.get("owner_name") or "",
                       email=doc.get("owner_email") or "", role="user")
@@ -591,6 +626,8 @@ def to_user_view(doc: dict) -> UserTicketView:
         notes=_notes(doc),
         decision=_decision(doc),
         approval=requester_approval(approval),
+        policy_evidence=(redact_policy_evaluation(ev, doc["ticket_id"])
+                         if (ev := _latest_policy_evaluation(doc)) else None),
         created_at=doc.get("created_at"),
         updated_at=doc.get("updated_at"),
     )
@@ -602,6 +639,7 @@ _SYSTEM_ADMIN_VIEWER = UserPublic(username="", name="Admin", email="", role="adm
 def to_admin_view(doc: dict, viewer: Optional[UserPublic] = None) -> AdminTicketView:
     return AdminTicketView(
         approval=_ticket_approval(doc, viewer or _SYSTEM_ADMIN_VIEWER),
+        policy_evaluation=_latest_policy_evaluation(doc),
         ticket_id=doc["ticket_id"],
         status=doc.get("status") or "unknown",
         owner_username=doc.get("owner_username"),

@@ -14,9 +14,10 @@ import requests
 import streamlit as st
 
 from ui.lib.api import (
-    APPROVAL_ACTIONS, APPROVAL_STATUSES, COMMENT_REQUIRED_ACTIONS, PO_DRAFT_LABEL, RISK_BADGE, ApiError,
-    api_get, api_post, approval_badge, current_user, friendly_error,
+    APPROVAL_ACTIONS, APPROVAL_STATUSES, APPROVED_INTERNALLY, COMMENT_REQUIRED_ACTIONS, PO_DRAFT_LABEL, RISK_BADGE,
+    ApiError, api_get, api_post, approval_badge, current_user, friendly_error,
 )
+from ui.lib.policy_render import embedded_or_fetch, render_policy_evidence
 from ui.lib.approval_render import (
     decision_line, fmt_amount, fmt_ts, render_decisions, render_reasons, render_snapshot, render_summary,
     safety_notice,
@@ -171,7 +172,30 @@ def detail_section(view: dict) -> None:
         render_decisions(view)
     st.subheader("What is being approved (review snapshot)")
     render_snapshot(view)
+    policy_evidence_section(view)
+    if view.get("status") == "approved":
+        st.success(f"✅ {APPROVED_INTERNALLY}")
     decision_section(view)
+
+
+def policy_evidence_section(view: dict) -> None:
+    """Policy evidence and rate-card comparison shown before a decision (bound to the snapshot's hash)."""
+    snap = view.get("review_snapshot") if isinstance(view.get("review_snapshot"), dict) else {}
+    bound = snap.get("policy_evaluation") if isinstance(snap.get("policy_evaluation"), dict) else None
+    evaluation, err = embedded_or_fetch(view, "policy_evaluation")
+    if err:
+        st.subheader("📑 Policy evidence")
+        st.warning(f"Policy evidence unavailable: {err}")
+        return
+    render_policy_evidence(evaluation)
+    if bound and bound.get("evaluation_hash"):
+        h = str(bound["evaluation_hash"])
+        st.caption(f"This approval is bound to policy evaluation `{h[:12]}…` (rule set "
+                   f"{bound.get('rule_set_version') or '—'}).")
+        current = str((evaluation or {}).get("evaluation_hash") or "")
+        if current and current != h:
+            st.warning("⚠️ The latest policy evidence differs from the evidence this approval was created with. "
+                       "Review carefully — the decision applies only to the bound version.")
 
 
 def decision_section(view: dict) -> None:
@@ -223,6 +247,8 @@ def confirm_section(view: dict, pending: dict) -> None:
         if pending.get("comment"):
             st.markdown(f"Comment: “{pending['comment']}”")
         st.caption("This records an internal authorization decision only. No order or payment is executed.")
+        if pending["action"] == "approve":
+            st.caption(f"After approval: {APPROVED_INTERNALLY}")
         checked = st.checkbox("I have reviewed the snapshot above and want to record this decision.",
                               key="apr_confirm_check")
         inflight = bool(st.session_state.get("apr_inflight"))
@@ -286,6 +312,8 @@ def submit_decision(pending: dict) -> None:
         _flash("error", UNCONFIRMED)
         return
     msg = f"Server recorded: {decision_line(decision)}."
+    if decision.get("action") == "approve":
+        msg += f" {APPROVED_INTERNALLY}"
     if data.get("replayed"):
         msg += " (Already recorded earlier — no duplicate decision was created.)"
     st.session_state["apr_outcome"] = msg

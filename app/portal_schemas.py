@@ -162,6 +162,7 @@ class UserTicketView(BaseModel):
     notes: list[TicketNote] = Field(default_factory=list)
     decision: Optional[Decision] = None
     approval: Optional[dict] = None                # requester-safe approval summary (Phase 2)
+    policy_evidence: Optional[dict] = None         # redacted policy findings + citation labels (Policy RAG)
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None
 
@@ -182,5 +183,6 @@ class AdminTicketView(BaseModel):
     last_run_by: Optional[str] = None
     error: Optional[str] = None
     approval: Optional[dict] = None                # current approval request + history (Phase 2)
+    policy_evaluation: Optional[dict] = None       # latest policy evaluation snapshot (Policy RAG)
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None

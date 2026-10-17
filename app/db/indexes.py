@@ -26,6 +26,42 @@ def _ensure_approval_indexes(db: Database) -> None:
         pass
 
 
+def _ensure_policy_rag_b_indexes(db: Database) -> None:
+    """Rate-card rows and append-only policy evidence snapshots (Policy RAG)."""
+    rates = db.rate_card_entries
+    rates.create_index([("rate_id", ASCENDING)], unique=True, name="rate_id_unique")
+    rates.create_index([("vendor_key", ASCENDING), ("item_or_service_code", ASCENDING),
+                        ("effective_from", ASCENDING), ("effective_to", ASCENDING)],
+                       name="rate_vendor_item_validity")
+    rates.create_index([("document_id", ASCENDING)], name="rate_document")
+    rates.create_index([("verification_status", ASCENDING)], name="rate_verification")
+    snaps = db.policy_evidence_snapshots
+    snaps.create_index([("snapshot_id", ASCENDING)], unique=True, name="snapshot_id_unique")
+    snaps.create_index([("ticket_id", ASCENDING), ("run_count", ASCENDING)], unique=True,
+                       name="snapshot_ticket_run_unique")
+
+
+def _ensure_policy_rag_a_indexes(db: Database) -> None:
+    """Policy library documents, chunks and append-only policy events (Policy RAG ingestion)."""
+    docs = db.policy_documents
+    docs.create_index([("document_id", ASCENDING)], unique=True, name="document_id_unique")
+    docs.create_index([("content_hash", ASCENDING)], name="content_hash")
+    docs.create_index([("document_type", ASCENDING), ("status", ASCENDING)], name="type_status")
+    docs.create_index([("vendor_key", ASCENDING), ("document_type", ASCENDING), ("status", ASCENDING)],
+                      name="vendor_type_status")
+    docs.create_index([("effective_from", ASCENDING), ("effective_to", ASCENDING)], name="effective_range")
+    docs.create_index([("logical_key", ASCENDING), ("version", ASCENDING)], unique=True,
+                      name="logical_key_version_unique")
+    chunks = db.policy_chunks
+    chunks.create_index([("chunk_id", ASCENDING)], unique=True, name="chunk_id_unique")
+    chunks.create_index([("document_id", ASCENDING), ("content_hash", ASCENDING), ("page_number", ASCENDING)],
+                        name="doc_page")
+    chunks.create_index([("document_status", ASCENDING), ("document_type", ASCENDING)], name="chunk_status_type")
+    db.policy_events.create_index([("created_at", ASCENDING)], name="policy_event_time")
+    db.policy_events.create_index([("document_id", ASCENDING), ("created_at", ASCENDING)],
+                                  name="policy_event_document")
+
+
 def ensure_indexes(db: Optional[Database] = None) -> None:
     db = db if db is not None else get_database()
     try:
@@ -45,5 +81,7 @@ def ensure_indexes(db: Optional[Database] = None) -> None:
         db.sessions.create_index([("token_hash", ASCENDING)], unique=True, name="token_hash_unique")
         db.sessions.create_index([("expires_at", ASCENDING)], expireAfterSeconds=0, name="expires_at_ttl")
         _ensure_approval_indexes(db)
+        _ensure_policy_rag_b_indexes(db)
+        _ensure_policy_rag_a_indexes(db)
     except PyMongoError as exc:
         raise PersistenceError("Database unavailable: could not initialize indexes. Please try again later.") from exc

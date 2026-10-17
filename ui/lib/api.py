@@ -59,6 +59,8 @@ APPROVAL_ACTIONS = {"approve": "Approve", "reject": "Reject", "request_changes":
 COMMENT_REQUIRED_ACTIONS = {"reject", "request_changes"}
 APPROVAL_SAFETY_NOTICE = "Approval records internal authorization only. No order or payment is executed."
 PO_DRAFT_LABEL = "Draft — no order placed, nothing paid"
+APPROVED_INTERNALLY = ("Approved internally — purchase order remains a draft; "
+                       "no order or payment has been executed.")
 RISK_BADGE = {"low": "🟢 low", "medium": "🟠 medium", "high": "🔴 high"}
 
 
@@ -83,10 +85,11 @@ def badge(status: Optional[str]) -> str:
 class ApiError(Exception):
     """Friendly backend error carrying the HTTP status code and the backend's `detail` message."""
 
-    def __init__(self, status_code: int, detail: str) -> None:
+    def __init__(self, status_code: int, detail: str, body: Any = None) -> None:
         super().__init__(f"HTTP {status_code}: {detail}")
         self.status_code = status_code
         self.detail = detail
+        self.body = body  # parsed JSON error body (e.g. FastAPI validation entries), if any
 
 
 def _extract_detail(resp: Any) -> str:
@@ -144,7 +147,11 @@ def _handle(resp: Any, authenticated: bool) -> Any:
         clear_session(SESSION_EXPIRED)
         st.rerun()
     if status >= 400:
-        raise ApiError(status, _extract_detail(resp))
+        try:
+            body = resp.json()
+        except Exception:
+            body = None
+        raise ApiError(status, _extract_detail(resp), body if isinstance(body, (dict, list)) else None)
     if status == 204:
         return None
     try:
@@ -171,6 +178,16 @@ def api_put(path: str, payload: dict) -> Any:
                    bool(headers))
 
 
+UPLOAD_TIMEOUT = 300
+
+
+def api_post_files(path: str, files: list, data: Optional[dict] = None, timeout: int = UPLOAD_TIMEOUT) -> Any:
+    """Multipart POST. ``files`` is a list of ``("files", (name, bytes, mime))`` tuples (requests format)."""
+    headers = _headers()
+    return _handle(requests.post(f"{API_BASE}{path}", files=files, data=data or {}, headers=headers,
+                                 timeout=timeout), bool(headers))
+
+
 def friendly_error(exc: Exception, ticket: bool = False) -> str:
     """Turn an exception into a user-facing message. ``ticket=True`` for ticket-ID lookups."""
     if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
@@ -180,6 +197,8 @@ def friendly_error(exc: Exception, ticket: bool = False) -> str:
             return "Ticket not found."
         if exc.status_code == 422 and ticket:
             return "Invalid ticket ID format (expected e.g. `REQ-20261017-9F3A1C2B`)."
+        if exc.status_code == 413:
+            return f"File too large: {exc.detail}" if exc.detail else "File too large."
         if exc.status_code == 503:
             return f"⛔ {exc.detail or 'Database unavailable.'}"
         if exc.status_code == 409:

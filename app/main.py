@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
 from datetime import date
 from typing import Optional
@@ -24,6 +25,9 @@ from app.routers import admin_tickets as admin_tickets_router
 from app.routers import approvals as approvals_router
 from app.routers import auth as auth_router
 from app.routers import my_tickets as my_tickets_router
+from app.routers import policy_documents as policy_documents_router
+from app.routers import policy_search as policy_search_router
+from app.policy_rag.errors import PolicyRagError
 from app.schemas import DraftPO, ReconciliationReport, WorkflowResult
 from app.services import ticket_service
 from app.services.errors import TicketError
@@ -32,6 +36,20 @@ logger = logging.getLogger(__name__)
 
 TICKET_ID_PATTERN = r"^REQ-[A-Za-z0-9-]{1,64}$"
 _DISABLED_MSG = "Persistence is disabled"
+
+
+def _seed_policy_library() -> None:
+    """Ingest bundled policy PDFs not yet in the library (POLICY_RAG_SEED=0 disables). Only logs on failure."""
+    if os.getenv("POLICY_RAG_SEED", "1").strip() == "0":
+        return
+    try:
+        from app.policy_rag.ingestion import seed_from_directory
+        results = seed_from_directory("data/policies", uploaded_by="system")
+        if results:
+            logger.info("Policy library seeding: %d new file(s), %d ok.", len(results),
+                        sum(1 for r in results if r.ok))
+    except Exception as exc:  # noqa: BLE001 - never block startup on policy seeding
+        logger.warning("Policy library seeding failed (%s).", type(exc).__name__)
 
 
 @asynccontextmanager
@@ -48,6 +66,7 @@ async def lifespan(_: FastAPI):
                 seed_approvers_from_env()
             except Exception as seed_exc:  # noqa: BLE001 - never block startup on approver seeding
                 logger.warning("Approver seeding failed (%s).", type(seed_exc).__name__)
+            _seed_policy_library()
         except Exception as exc:  # noqa: BLE001 - start anyway; health reports unavailable
             logger.warning("MongoDB not reachable at startup (%s); persistence endpoints will return 503.",
                            type(exc).__name__)
@@ -91,6 +110,15 @@ app.include_router(admin_tickets_router.router)
 # Registered before the legacy /api/tickets/{ticket_id} routes; only /api/tickets/{id}/approval is opened
 # to owners/approvers, the legacy ticket routes stay admin-only.
 app.include_router(approvals_router.router)
+
+
+@app.exception_handler(PolicyRagError)
+async def _policy_rag_error_handler(_: Request, exc: PolicyRagError):
+    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+
+
+app.include_router(policy_documents_router.router)
+app.include_router(policy_search_router.router)
 _ADMIN_ONLY = [Depends(require_admin)]
 
 

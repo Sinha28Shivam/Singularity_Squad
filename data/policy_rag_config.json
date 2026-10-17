@@ -1,0 +1,36 @@
+{
+  "rule_set_version": "policy-rag-rules-v1",
+  "upload_max_mb": 20,
+  "max_pdf_pages": 500,
+  "retrieval_top_k": 8,
+  "min_relevance": 0.15,
+  "low_text_chars_per_page": 80,
+  "chunk_target_tokens": 450,
+  "chunk_overlap_tokens": 60,
+  "embedding_model": "text-embedding-3-small",
+  "require_verified_rate_cards": true,
+  "rate_tolerance_inr": "1.00",
+  "fail_closed_on_retrieval_failure": true,
+  "precedence": [],
+  "vendor_key_aliases": {
+    "VEN-001": "evt-ven-001", "VEN-002": "evt-ven-002", "VEN-003": "evt-ven-003",
+    "VEN-004": "evt-ven-004", "VEN-005": "evt-ven-005", "VEN-006": "evt-ven-006"
+  },
+  "catering_vendor_keys": {
+    "VEN-001": "cat-ven-001", "VEN-002": "cat-ven-002", "VEN-003": "cat-ven-003",
+    "VEN-004": "cat-ven-004", "VEN-005": "cat-ven-005"
+  },
+  "review_topics": {
+    "safety_review": {"query": "risk assessment safety emergency first aid supervision", "category": "security", "min_attendees": 150},
+    "vendor_verification": {"query": "vendor verification licenses insurance confirm facilities", "category": "vendor_eligibility"},
+    "data_privacy": {"query": "personal data photo handling privacy consent", "category": "privacy"}
+  },
+  "approval_reason_texts": {
+    "POLICY_REVIEW_REQUIRED": "Policy library evidence requires human review (see findings).",
+    "RATE_CARD_MISMATCH": "Quoted price differs from the verified rate card.",
+    "RATE_CARD_UNVERIFIED": "Applicable rate-card entry is not verified yet.",
+    "POLICY_CONFLICT": "Conflicting policy documents were found; precedence is not configured.",
+    "INSUFFICIENT_POLICY_EVIDENCE": "No sufficiently relevant policy evidence was found.",
+    "POLICY_RETRIEVAL_DEGRADED": "Policy retrieval ran in degraded (keyword-only) mode."
+  }
+}

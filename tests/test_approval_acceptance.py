@@ -6,7 +6,8 @@ request changes + resubmission, hard block). Skipped when no MongoDB server is r
 Override the server with WORKPLACEOPS_TEST_MONGODB_URI (never commit credentials).
 """
 
-import os
+import os
+import tempfile
 import re
 import socket
 import subprocess
@@ -84,6 +85,8 @@ class _Server:
             "MONGODB_DATABASE": db_name,
             "WORKPLACEOPS_PERSISTENCE": "required",
             "WORKPLACEOPS_OFFLINE": "1",
+            "POLICY_RAG_SEED": "0",
+            "POLICY_STORE_DIR": tempfile.mkdtemp(prefix="wops_store_"),
             "ADMIN_USERNAME": ADMIN_USERNAME,
             "ADMIN_PASSWORD": ADMIN_PASSWORD,
             "APPROVER_ACCOUNTS": APPROVER_ACCOUNTS,

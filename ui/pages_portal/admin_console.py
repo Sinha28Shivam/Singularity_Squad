@@ -11,6 +11,7 @@ from ui.lib.api import (
     EVENT_CATEGORY_LABELS, PO_DRAFT_LABEL, TICKET_STATUSES, api_get, api_post, badge, friendly_error,
 )
 from ui.lib.approval_render import APPROVAL_TICKET_STATUSES, render_ticket_approval_panel, ticket_approval
+from ui.lib.policy_render import embedded_or_fetch, render_policy_evidence
 from ui.lib.render import (
     INVOICE_LABELS, format_inr, invoice_options, render_final_status, render_pipeline, render_result_tabs,
 )
@@ -275,6 +276,19 @@ def approval_section(view: dict) -> None:
             st.rerun()
 
 
+def policy_evidence_section(view: dict) -> None:
+    """Full policy evidence for the latest run (embedded ``policy_evaluation`` or GET /evidence)."""
+    has_run = int(view.get("run_count") or 0) > 0 or bool(view.get("workflow_result"))
+    if "policy_evaluation" not in view and not has_run:
+        return
+    evaluation, err = embedded_or_fetch(view, "policy_evaluation")
+    if err:
+        st.subheader("📑 Policy evidence")
+        st.warning(f"Policy evidence unavailable: {err}")
+        return
+    render_policy_evidence(evaluation)
+
+
 def load_ticket_quiet(ticket_id: str) -> None:
     msg = st.session_state.get("admin_flash")
     if load_ticket(ticket_id) and msg is not None:
@@ -317,6 +331,7 @@ def detail_section(view: dict) -> None:
     render_requester(view)
     actions_section(view, result)
     approval_section(view)
+    policy_evidence_section(view)
     notes_section(view)
 
     st.divider()

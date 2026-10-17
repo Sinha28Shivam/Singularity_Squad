@@ -13,6 +13,7 @@ from ui.lib.api import (
 )
 from ui.lib.api import PO_DRAFT_LABEL
 from ui.lib.approval_render import render_ticket_approval_panel, ticket_approval
+from ui.lib.policy_render import embedded_or_fetch, render_policy_evidence
 from ui.lib.render import format_inr
 
 DEFAULT_EVENT_DATE = date(2026, 10, 23)
@@ -135,6 +136,8 @@ def render_user_ticket(view: dict) -> None:
     elif tav is not None or status in ("pending_approval", "changes_requested", "approval_expired"):
         render_ticket_approval_panel(tav)
 
+    policy_evidence_section(view)
+
     sub = view.get("submission") or {}
     st.subheader("Submitted details")
     rows = [
@@ -194,6 +197,18 @@ def render_user_ticket(view: dict) -> None:
                 st.rerun()
             except Exception as exc:
                 st.error(friendly_error(exc))
+
+
+def policy_evidence_section(view: dict) -> None:
+    """Redacted policy evidence: finding summaries and citation labels only (never document text)."""
+    fetch = view.get("status") not in ("submitted", "processing")
+    evaluation, err = embedded_or_fetch(view, "policy_evidence", fetch=fetch)
+    if err:
+        st.caption(f"Policy check details unavailable: {err}")
+        return
+    if evaluation is None:
+        return
+    render_policy_evidence(evaluation, redacted=True, heading="📑 Policy check")
 
 
 def render_notes(notes: list[dict]) -> None:
