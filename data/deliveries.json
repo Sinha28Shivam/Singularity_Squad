@@ -1,0 +1,26 @@
+[
+  {
+    "delivery_id": "DEL-7001",
+    "po_id": "DRAFT-PO-1001",
+    "vendor_id": "VEN-002",
+    "delivered_on": "2026-10-23",
+    "items": {
+      "Lunch": 100,
+      "Delivery & setup": 1
+    },
+    "signed_by": "Facilities Desk (synthetic)",
+    "notes": "All meals delivered on time."
+  },
+  {
+    "delivery_id": "DEL-7002",
+    "po_id": "DRAFT-PO-1001",
+    "vendor_id": "VEN-002",
+    "delivered_on": "2026-10-23",
+    "items": {
+      "Lunch": 95,
+      "Delivery & setup": 1
+    },
+    "signed_by": "Facilities Desk (synthetic)",
+    "notes": "5 meals short; vendor notified."
+  }
+]

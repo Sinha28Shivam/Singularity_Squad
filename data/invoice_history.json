@@ -1,0 +1,18 @@
+[
+  {
+    "invoice_id": "INV-4987",
+    "vendor_id": "VEN-002",
+    "po_id": "PO-0950",
+    "total": 43050,
+    "status": "paid",
+    "paid_on": "2026-09-12"
+  },
+  {
+    "invoice_id": "INV-4990",
+    "vendor_id": "VEN-001",
+    "po_id": "PO-0961",
+    "total": 27300,
+    "status": "paid",
+    "paid_on": "2026-09-30"
+  }
+]

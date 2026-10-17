@@ -1,0 +1,6 @@
+{
+  "happy_path": "Organize lunch for 100 employees next Friday. Keep the total under Rs 1,00,000, use an approved vendor, and follow the workplace event policy.",
+  "over_budget": "Organize lunch for 120 employees next Friday at the Bengaluru office. Budget is Rs 60,000. Approved vendors only.",
+  "missing_info": "Can you arrange lunch for the team sometime soon?",
+  "too_soon": "We need lunch for 40 people on Monday. Budget 40000 INR."
+}

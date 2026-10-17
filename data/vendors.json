@@ -1,0 +1,99 @@
+[
+  {
+    "vendor_id": "VEN-001",
+    "name": "Saffron Table Caterers (synthetic)",
+    "approved": true,
+    "services": [
+      "lunch",
+      "breakfast",
+      "snacks"
+    ],
+    "rate_per_person": 650,
+    "delivery_setup_fee": 2000,
+    "gst_rate": 0.05,
+    "capacity": 150,
+    "available_dates": [
+      "2026-10-22",
+      "2026-10-30",
+      "2026-11-06"
+    ],
+    "rating": 4.8,
+    "preferred": true
+  },
+  {
+    "vendor_id": "VEN-002",
+    "name": "GreenLeaf Kitchens (synthetic)",
+    "approved": true,
+    "services": [
+      "lunch",
+      "dinner"
+    ],
+    "rate_per_person": 700,
+    "delivery_setup_fee": 2500,
+    "gst_rate": 0.05,
+    "capacity": 200,
+    "available_dates": [
+      "2026-10-23",
+      "2026-10-30",
+      "2026-11-06"
+    ],
+    "rating": 4.5,
+    "preferred": false
+  },
+  {
+    "vendor_id": "VEN-003",
+    "name": "QuickBite Express (synthetic)",
+    "approved": false,
+    "services": [
+      "lunch",
+      "snacks"
+    ],
+    "rate_per_person": 480,
+    "delivery_setup_fee": 0,
+    "gst_rate": 0.05,
+    "capacity": 300,
+    "available_dates": [
+      "2026-10-23",
+      "2026-10-30"
+    ],
+    "rating": 3.9,
+    "preferred": false
+  },
+  {
+    "vendor_id": "VEN-004",
+    "name": "Little Spoon Cafe (synthetic)",
+    "approved": true,
+    "services": [
+      "lunch",
+      "snacks"
+    ],
+    "rate_per_person": 600,
+    "delivery_setup_fee": 1000,
+    "gst_rate": 0.05,
+    "capacity": 80,
+    "available_dates": [
+      "2026-10-23"
+    ],
+    "rating": 4.6,
+    "preferred": false
+  },
+  {
+    "vendor_id": "VEN-005",
+    "name": "Royal Feast Banquets (synthetic)",
+    "approved": true,
+    "services": [
+      "lunch",
+      "dinner"
+    ],
+    "rate_per_person": 950,
+    "delivery_setup_fee": 5000,
+    "gst_rate": 0.05,
+    "capacity": 500,
+    "available_dates": [
+      "2026-10-23",
+      "2026-10-30"
+    ],
+    "rating": 4.9,
+    "preferred": false
+  }
+]

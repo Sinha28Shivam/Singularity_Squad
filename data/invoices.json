@@ -1,0 +1,77 @@
+[
+  {
+    "invoice_id": "INV-5001",
+    "po_id": "DRAFT-PO-1001",
+    "vendor_id": "VEN-002",
+    "invoice_date": "2026-10-24",
+    "delivery_id": "DEL-7001",
+    "line_items": [
+      {
+        "description": "Lunch",
+        "quantity": 100,
+        "unit_price": 700,
+        "line_total": 70000
+      },
+      {
+        "description": "Delivery & setup",
+        "quantity": 1,
+        "unit_price": 2500,
+        "line_total": 2500
+      }
+    ],
+    "subtotal": 72500,
+    "tax": 3625.0,
+    "total": 76125.0,
+    "currency": "INR"
+  },
+  {
+    "invoice_id": "INV-5002",
+    "po_id": "DRAFT-PO-1001",
+    "vendor_id": "VEN-002",
+    "invoice_date": "2026-10-24",
+    "delivery_id": "DEL-7002",
+    "line_items": [
+      {
+        "description": "Lunch",
+        "quantity": 100,
+        "unit_price": 720,
+        "line_total": 72000
+      },
+      {
+        "description": "Delivery & setup",
+        "quantity": 1,
+        "unit_price": 2500,
+        "line_total": 2500
+      }
+    ],
+    "subtotal": 74500,
+    "tax": 3725.0,
+    "total": 78225.0,
+    "currency": "INR"
+  },
+  {
+    "invoice_id": "INV-4987",
+    "po_id": "DRAFT-PO-1001",
+    "vendor_id": "VEN-002",
+    "invoice_date": "2026-10-24",
+    "delivery_id": "DEL-7001",
+    "line_items": [
+      {
+        "description": "Lunch",
+        "quantity": 100,
+        "unit_price": 700,
+        "line_total": 70000
+      },
+      {
+        "description": "Delivery & setup",
+        "quantity": 1,
+        "unit_price": 2500,
+        "line_total": 2500
+      }
+    ],
+    "subtotal": 72500,
+    "tax": 3625.0,
+    "total": 76125.0,
+    "currency": "INR"
+  }
+]

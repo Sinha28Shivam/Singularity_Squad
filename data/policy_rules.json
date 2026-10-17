@@ -1,0 +1,33 @@
+{
+  "per_head_catering_cap": 900,
+  "approved_vendor_only": true,
+  "min_lead_time_business_days": 5,
+  "max_attendees_without_facilities_review": 150,
+  "approval_tiers": [
+    {
+      "max_amount": 50000,
+      "approver": "Team Manager"
+    },
+    {
+      "max_amount": 150000,
+      "approver": "Department Head + Finance Business Partner"
+    },
+    {
+      "max_amount": null,
+      "approver": "CFO"
+    }
+  ],
+  "invoice_amount_tolerance": 1.0,
+  "clause_refs": {
+    "per_head_catering_cap": "EVT-3.1",
+    "approved_vendor_only": "PROC-2.1",
+    "min_lead_time_business_days": "EVT-2.2",
+    "max_attendees_without_facilities_review": "EVT-2.4",
+    "approval_tiers": "PROC-4.1",
+    "invoice_amount_tolerance": "FIN-5.3",
+    "budget_limit": "EVT-3.3",
+    "duplicate_invoice": "FIN-5.4",
+    "delivery_evidence": "FIN-5.2",
+    "three_way_match": "FIN-5.1"
+  }
+}
