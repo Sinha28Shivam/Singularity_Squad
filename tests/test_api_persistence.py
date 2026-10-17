@@ -15,8 +15,8 @@ TODAY = "2026-10-17"
 
 
 @pytest.fixture
-def client():
-    with TestClient(app) as c:
+def client(admin_headers):
+    with TestClient(app, headers=admin_headers) as c:
         yield c
 
 

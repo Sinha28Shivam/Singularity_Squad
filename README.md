@@ -5,11 +5,16 @@ All data is synthetic. Draft PO only: the system makes no purchase and approves 
 
 Execution flow, function call sequence and file dependencies: see [flow.md](flow.md).
 
+**Two roles (one Streamlit app):**
+- **Users** sign up, fill in an event request form (category, catering service, date, attendees, budget, location, notes) and track their own tickets: status, outcome, admin notes, and edit & resubmit when more info is needed.
+- **Admins** log in with the account from `.env` and get a queue of all tickets. They run or re-run the multi-agent workflow (with a demo invoice) and see every result tab. They approve or reject the draft PO with a note.
+- Approving only records the decision; the PO stays a draft.
+
 ## Run
 ```powershell
 python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --port 8000          # API (docs at /docs)
-python -m streamlit run ui\streamlit_app.py         # UI at http://localhost:8501
+python -m streamlit run ui\streamlit_app.py         # UI at http://localhost:8501 (log in as admin, or Create account)
 python -m pytest -q                                 # tests (mongomock; real-MongoDB integration + restart tests run if MongoDB is up)
 ```
 
@@ -28,6 +33,8 @@ Stop-Process -Id <PID>
 - `OPENAI_BASE_URL` (optional, for Azure/OpenAI-compatible endpoints).
 - `WORKPLACEOPS_OFFLINE=1` forces deterministic mode.
 - `MONGODB_URI` (default `mongodb://localhost:27017/`), `MONGODB_DATABASE` (default `workplaceops`).
+- `ADMIN_USERNAME`, `ADMIN_PASSWORD`: the admin account is created or updated at API startup. If unset there is no admin; there is no default password.
+- `SESSION_TTL_HOURS` (default 8): login session lifetime. Optional: `ADMIN_NAME`, `ADMIN_EMAIL`.
 - `WORKPLACEOPS_PERSISTENCE`: `required` (default; DB write failures return 503) or `disabled` (no database).
 
 See [.env.example](.env.example). Every workflow run is saved to MongoDB as a ticket (`tickets`, `purchase_orders`, `agent_logs`). You can reload it after a restart with `GET /api/tickets/{ticket_id}` and `/audit`, or from the UI's **Saved tickets** panel.
@@ -48,8 +55,10 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 - `app/agents/`: one module per agent.
 - `app/orchestrator.py`: workflow state and audit trail.
 - `app/main.py`: FastAPI app.
-- `app/services/`: ticket service (runs the workflow, then persists it).
+- `app/routers/`: auth, user (`/api/my/*`) and admin (`/api/admin/*`) endpoints.
+- `app/auth/`: password hashing, sessions, `current_user` / `require_admin`.
+- `app/services/`: ticket service (submit, run, decide, notes, resubmit; persistence).
 - `app/repositories/`, `app/db/`: the MongoDB data-access layer and shared client.
-- `ui/streamlit_app.py`: Streamlit UI.
+- `ui/app.py`: Streamlit entry point (login, User portal, Admin console in `ui/pages_portal/`). `ui/streamlit_app.py` is a shim that runs it.
 - `data/`: synthetic vendors, policies, invoices and deliveries.
 - `tests/`: test suite.

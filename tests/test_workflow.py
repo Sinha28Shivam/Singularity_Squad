@@ -61,8 +61,8 @@ def test_short_lead_time_withholds_po():
     assert r.procurement.po is None
 
 
-def test_api_endpoints():
-    c = TestClient(app)
+def test_api_endpoints(admin_headers):
+    c = TestClient(app, headers=admin_headers)
     assert c.get("/api/health").json()["status"] == "ok"
     res = c.post("/api/workflow", json={"text": S["happy_path"], "today": "2026-10-17"}).json()
     assert res["final_status"] == "pass"

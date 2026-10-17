@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Optional, Union
 
-from pymongo import ASCENDING
+from pymongo import ASCENDING, DESCENDING
 from pymongo.database import Database
 from pymongo.errors import BulkWriteError, PyMongoError
 
@@ -84,6 +84,16 @@ def append_audit_entries(ticket_id: str, entries: list[Union[AuditEntry, dict]],
         return int(details.get("nInserted", len(docs) - len(write_errors)))
     except PyMongoError as exc:
         raise PersistenceError() from exc
+
+
+def get_last_sequence(ticket_id: str, *, db: Optional[Database] = None) -> int:
+    """Highest stored audit sequence for a ticket (0 if none)."""
+    try:
+        doc = _resolve_db(db).agent_logs.find_one({"ticket_id": ticket_id}, {"_id": 0, "sequence": 1},
+                                                  sort=[("sequence", DESCENDING)])
+    except PyMongoError as exc:
+        raise PersistenceError() from exc
+    return int(doc["sequence"]) if doc and doc.get("sequence") is not None else 0
 
 
 def get_audit_entries(ticket_id: str, limit: int = MAX_AUDIT_LIMIT, *, db: Optional[Database] = None) -> list[dict]:

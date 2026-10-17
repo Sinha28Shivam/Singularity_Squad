@@ -34,6 +34,8 @@ OVER_BUDGET_TEXT = (
     "Budget is Rs 60,000. Approved vendors only."
 )
 TICKET_RE = re.compile(r"^REQ-\d{8}-[0-9A-F]{8}$")
+ADMIN_USERNAME = "restart-admin"
+ADMIN_PASSWORD = "restart-admin-pass-123"  # test-only credential for the disposable database
 
 
 def _mongo_available() -> bool:
@@ -73,6 +75,8 @@ class _Server:
                 "MONGODB_DATABASE": db_name,
                 "WORKPLACEOPS_PERSISTENCE": "required",
                 "WORKPLACEOPS_OFFLINE": "1",
+                "ADMIN_USERNAME": ADMIN_USERNAME,
+                "ADMIN_PASSWORD": ADMIN_PASSWORD,
             }
         )
         self.proc = subprocess.Popen(
@@ -128,6 +132,15 @@ def _run_server(db_name: str):
     server = _Server(db_name)
     try:
         health = server.wait_ready()
+    except Exception:
+        server.stop()
+        raise
+    try:
+        assert server.client.get("/api/tickets").status_code == 401
+        r = server.client.post("/api/auth/login",
+                               json={"username": ADMIN_USERNAME, "password": ADMIN_PASSWORD})
+        assert r.status_code == 200, r.text
+        server.client.headers["Authorization"] = f"Bearer {r.json()['token']}"
     except Exception:
         server.stop()
         raise

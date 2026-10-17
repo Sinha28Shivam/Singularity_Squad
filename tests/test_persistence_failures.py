@@ -17,8 +17,8 @@ FAKE_URI = "mongodb://appuser:S3cretPass@db.example.internal:27017/"
 
 
 @pytest.fixture
-def client():
-    with TestClient(app) as c:
+def client(admin_headers):
+    with TestClient(app, headers=admin_headers) as c:
         yield c
 
 

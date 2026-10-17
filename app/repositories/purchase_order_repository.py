@@ -36,6 +36,22 @@ def upsert_draft_po(ticket_id: str, draft_po: Union[DraftPO, dict], created_at: 
         raise PersistenceError() from exc
 
 
+def set_po_approval(po_id: str, approval_status: str, by: str, at: datetime,
+                    *, db: Optional[Database] = None) -> bool:
+    """Record the human decision on a draft PO. The PO status stays "draft": nothing is issued."""
+    if approval_status not in ("approved", "rejected"):
+        raise ValueError("approval_status must be 'approved' or 'rejected'")
+    try:
+        res = _resolve_db(db).purchase_orders.update_one(
+            {"po_id": po_id, "status": "draft"},
+            {"$set": {"approval_status": approval_status, "approval_by": by,
+                      "approval_at": _as_utc(at), "updated_at": _now()}},
+        )
+    except PyMongoError as exc:
+        raise PersistenceError() from exc
+    return res.matched_count > 0
+
+
 def get_draft_pos_for_ticket(ticket_id: str, *, db: Optional[Database] = None) -> list[dict]:
     try:
         return list(_resolve_db(db).purchase_orders.find({"ticket_id": ticket_id}, NO_ID).sort("created_at", ASCENDING))
