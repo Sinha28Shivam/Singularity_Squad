@@ -8,6 +8,8 @@ from datetime import date
 from typing import Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -25,6 +27,9 @@ from app.routers import admin_tickets as admin_tickets_router
 from app.routers import approvals as approvals_router
 from app.routers import auth as auth_router
 from app.routers import my_tickets as my_tickets_router
+from app.routers import payments as payments_router
+from app.payments.config import validate_at_startup as validate_payment_settings
+from app.payments.service import PaymentServiceError
 from app.routers import policy_documents as policy_documents_router
 from app.routers import policy_search as policy_search_router
 from app.routers import policy_rules as policy_rules_router
@@ -70,6 +75,10 @@ def _bootstrap_policy_rules() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    try:
+        validate_payment_settings()  # logs problems; never raises (simulation fails closed)
+    except Exception as exc:  # noqa: BLE001 - never block startup on payment config
+        logger.warning("Payment simulation config check failed (%s).", type(exc).__name__)
     if persistence_mode() == "required":
         try:
             ping_database()
@@ -144,6 +153,28 @@ async def _rule_registry_error_handler(_: Request, exc: RuleRegistryError):
 
 
 app.include_router(policy_rules_router.router)
+
+
+@app.exception_handler(PaymentServiceError)
+async def _payment_error_handler(_: Request, exc: PaymentServiceError):
+    return JSONResponse(status_code=exc.status_code, content=exc.body())
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError):
+    """Payment-simulation routes get a safe PaymentError body (field names only, no echoed input/internals);
+    every other route keeps FastAPI's default 422 response."""
+    if not request.url.path.startswith(payments_router.PREFIX):
+        return await request_validation_exception_handler(request, exc)
+    fields = sorted({(".".join(str(p) for p in (e.get("loc") or ())[1:]) or "body")[:64]
+                     for e in exc.errors()})[:20]
+    return JSONResponse(status_code=422, content={
+        "error": "INVALID_REQUEST", "message": "The request is invalid. Rejected fields: " + ", ".join(fields)
+        + ". Note: mode, money_transferred, provider and account fields are server-controlled.",
+        "reasons": [], "mode": "SIMULATION", "money_transferred": False, "fields": fields})
+
+
+app.include_router(payments_router.router)
 _ADMIN_ONLY = [Depends(require_admin)]
 
 

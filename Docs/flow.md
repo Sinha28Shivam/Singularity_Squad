@@ -11,8 +11,9 @@ This document covers:
 - Phase 2 approval safety: approvers decide versioned approval requests, with separation of duties (section 11).
 - Phase 2 policy RAG: a multi-PDF policy library, cited evidence, rate cards and evidence snapshots that feed approvals (section 12).
 - Phase 3 dynamic policy engine: reviewed, versioned rules (data, not code) evaluated deterministically on every ticket run (section 13).
+- Dummy payment initiator: a **simulation-only** payment instruction for an approved, reconciled invoice, behind a backend eligibility gate (section 14).
 
-All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or payment. Saving a draft PO to the database does **not** approve or issue it.
+All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or real payment. Saving a draft PO to the database does **not** approve or issue it. The payment simulator (section 14) never contacts a bank or gateway and never transfers money: every record says `mode: "SIMULATION"` and `money_transferred: false`.
 
 ---
 
@@ -1288,3 +1289,174 @@ Evidence snapshots now carry `rule_engine`. Every run also records a `rule_engin
     - The pending decision bound to v7 got `409` "Policy set changed…" with `stale_policy: true`.
     - A re-run gave approval v2 on set v8 with the new code, and the run-1 snapshot was byte-identical. The fresh decision gave `200`.
   - **Audit and PO state:** every PO is `draft`, and the rule events include candidate_created, validated, approved, rejected, duplicate_linked, policy_set_activated and bootstrap_completed, plus 3 `rule_engine_evaluated` events.
+
+---
+
+## 14. Dummy payment initiator — SIMULATION ONLY (spec `Docs/WORKPLACEOPS_DUMMY_PAYMENT_INITIATOR_IMPLEMENTATION.md`)
+
+The workflow can now end in a **simulated payment instruction**: request → policy checks → vendor match → draft PO → invoice match → approval → simulated instruction → simulated receipt.
+
+The payment step is a local, deterministic simulator behind a backend eligibility gate:
+
+- No bank, UPI/NEFT/RTGS, card or gateway SDK is imported, and no network call is made. A guard test enforces this.
+- Every record, response and event carries `mode: "SIMULATION"` and `money_transferred: false`. These are server constants; the client cannot set them.
+- The draft PO stays `draft`.
+- There is no "real payment" mode.
+
+### 14.1 Files
+
+| File | Role |
+|---|---|
+| `app/payments/schemas.py` | Contracts: `PaymentSimulationIn` (`extra="forbid"`, `simulation_only: true`, `confirmed_by_user: true`, 2-dp Decimal amount string), `PaymentEligibility`, `PaymentSimulation`, `PaymentEvent`, `PaymentError`, the status set and `ALLOWED_TRANSITIONS`, and `parse_money` (rejects floats, NaN, inf, ≤0, >2 dp and out-of-range values). |
+| `app/payments/config.py` | `load_settings()` / `validate_at_startup()`. Fails closed: the simulator is unavailable unless `PAYMENT_MODE=simulation` and `PAYMENT_SIMULATION_ENABLED=true`, with a valid profile and currencies, and never when `APP_ENV`/`ENVIRONMENT` is production. Values are never logged. |
+| `app/payments/simulator.py` | `simulate(payment_id, amount, currency, attempt, profile)`. Pure, with no randomness. Profiles: `normal` → `accepted_by_simulator`; `processing` → `processing_simulated`; `transient_failure` → attempt 1 `failed_simulated` / `SIMULATED_PROVIDER_UNAVAILABLE`, then accepted on retry. The fake reference is `PAY-SIM-XXXXXX`. |
+| `app/payments/eligibility.py` | `evaluate_eligibility(ticket_id, invoice_id, actor, ...)`. Deterministic gate that collects **all** failing reason codes (14.3). |
+| `app/payments/service.py` | Create, replay, conflict, retry, reconcile, get, list and events. Covers idempotency, the CAS state machine, the audit outbox and metrics. |
+| `app/payments/metrics.py` | In-process counters (requests, created, blocked by reason, failures, replays, retries, audit reconciliation failures) and latency. |
+| `app/payments/tool.py` | The narrow agent tool `create_simulated_payment(CreateSimulatedPaymentToolInput(ticket_id, invoice_id, purchase_order_id, idempotency_key), *, actor, confirmed_by_user)`. Amount and currency come from canonical records and the actor is injected by the backend. It has no URL, provider, mode or account fields, and it is not wired to the LLM. |
+| `app/repositories/payment_repository.py` | `payment_simulations` and `payment_simulation_events`. Unique indexes on `payment_id`, `idempotency_key_hash` and `intent_key` (`ticket_id|invoice_id`). Status changes are compare-and-set and checked against `ALLOWED_TRANSITIONS`. |
+| `app/routers/payments.py` | `/api/payments/simulation*` routes, plus a safe 422 body for this prefix (field names only, no echoed input). |
+| `ui/pages_portal/payments.py` | The "Payments (Simulation)" page: admin full flow, approver read-only. |
+
+### 14.2 API (`/api/payments/simulation`)
+
+| Method | Path | Who | Result |
+|---|---|---|---|
+| GET | `/eligibility/{invoice_id}?ticket_id=` | admin | `PaymentEligibility` (eligible, canonical amount, approval refs, policy-set version, reasons) |
+| POST | `` | admin | **201** created, or **200** idempotent replay (`replayed: true`). Errors: 422 `PAYMENT_NOT_ELIGIBLE` (with reasons), 409 `IDEMPOTENCY_CONFLICT` / `ALREADY_SIMULATED`, 503 `SIMULATION_DISABLED` / `AUDIT_UNAVAILABLE`, 403 `CALLER_NOT_AUTHORIZED` |
+| GET | `` (`?ticket_id=`) · `/{payment_id}` · `/{payment_id}/events` | admin, approver | list, detail, timeline |
+| POST | `/{payment_id}/retry` (body `{"confirmed_by_user": true}`) | admin | only from `failed_simulated`; same payment, `attempts+1`. Otherwise 409 `ILLEGAL_TRANSITION` |
+| POST | `/{payment_id}/reconcile` | admin | re-delivers missing audit events |
+| GET | `/metrics` | admin | counters and latency |
+
+- Users get `403` on every route; unauthenticated callers get `401`.
+- Error bodies are `{error, message, reasons:[{code,message}], mode, money_transferred}` and never include stack traces.
+- **Separation of duties:** approvers approve (`/api/approvals`), admins initiate, and admins can still never approve. An initiator who is also the approving actor is blocked with `CALLER_NOT_AUTHORIZED`.
+
+### 14.3 Eligibility gate (re-run on every create and retry)
+
+The "invoice" is the one reconciled on an **approved** portal ticket. The demo invoices are rebound to each ticket's draft PO, so a payment intent is scoped to `(ticket_id, invoice_id)`.
+
+The canonical amount is `Decimal(reconciliation.invoiced_total)`, which must equal the approved PO total. The client's amount, currency and PO are only *checked* against it, never trusted.
+
+| Reason code | When |
+|---|---|
+| `SIMULATION_DISABLED` | config unavailable (mode unset/invalid, disabled, production) |
+| `CALLER_NOT_AUTHORIZED` | role not in `PAYMENT_INITIATOR_ROLES` (default `admin`; `user` never allowed) or the caller is the approver |
+| `TICKET_NOT_APPROVED`, `APPROVAL_MISSING` | ticket not `approved`; no approved approval request or last decision not an approver's approve |
+| `APPROVAL_STALE` | approval snapshot differs from the current ticket (run_count, PO fields, reconciliation) **or** its bound `policy_set_version` ≠ the active policy set |
+| `RECONCILIATION_REQUIRED`, `INVOICE_NOT_FOUND` | no reconciliation on the ticket / unknown invoice id |
+| `INVOICE_PO_MISMATCH`, `PO_NOT_FOUND` | requested invoice/PO is not the one reconciled and approved / no draft PO |
+| `INVOICE_MATCH_FAILED` | reconciliation `mismatch` (e.g. INV-5002) |
+| `DUPLICATE_INVOICE` | reconciliation `duplicate` or invoice already in `invoice_history.json` (e.g. INV-4987) |
+| `POLICY_BLOCK`, `CLARIFICATION_REQUIRED` | hard policy block / unverifiable policy evaluation; open clarification or missing fields |
+| `AMOUNT_MISMATCH`, `CURRENCY_NOT_ALLOWED` | client amount ≠ canonical or approved total; currency not in `PAYMENT_ALLOWED_CURRENCIES` |
+| `ALREADY_SIMULATED` | a simulated payment already exists for this ticket and invoice |
+| `AUDIT_UNAVAILABLE` | Mongo or policy registry unreadable → 503, never "eligible" |
+
+### 14.4 Create flow
+
+```mermaid
+sequenceDiagram
+    participant UI as Admin UI (Payments page)
+    participant R as routers/payments.py
+    participant S as payments/service.py
+    participant E as payments/eligibility.py
+    participant DB as MongoDB
+    participant SIM as payments/simulator.py
+    UI->>R: GET /eligibility/INV-5001?ticket_id=...
+    R->>E: evaluate_eligibility (ticket, approval, policy set)
+    E-->>UI: eligible + canonical amount (no record written)
+    UI->>R: POST /api/payments/simulation (confirmed, idempotency_key)
+    R->>S: create_simulation(body, actor)
+    S->>DB: find by idempotency_key_hash
+    alt same key and same fingerprint
+        S-->>UI: 200 replayed (same payment_id)
+    else same key and different fingerprint
+        S-->>UI: 409 IDEMPOTENCY_CONFLICT
+    end
+    S->>E: re-check eligibility with the client values
+    alt not eligible
+        S->>DB: payment_simulation_blocked event (no payment record)
+        S-->>UI: 422 PAYMENT_NOT_ELIGIBLE + reason codes
+    end
+    S->>DB: insert record submitted_to_simulator (unique keys, outbox events)
+    S->>SIM: simulate(payment_id, amount, currency, attempt, profile)
+    SIM-->>S: accepted_by_simulator / processing_simulated / failed_simulated
+    S->>DB: CAS status transition + push status events to outbox
+    S->>DB: deliver outbox to payment_simulation_events + ticket audit line
+    alt all audit events written
+        S->>DB: audit_complete = true
+        S-->>UI: 201 receipt (SIMULATION, money_transferred false)
+    else audit write failed
+        S-->>UI: 503 AUDIT_UNAVAILABLE (payment_id, reconcile later)
+    end
+```
+
+State machine: `submitted_to_simulator → accepted_by_simulator | processing_simulated | failed_simulated`, `processing_simulated → accepted_by_simulator | failed_simulated`, and `failed_simulated → submitted_to_simulator` (explicit retry only). `accepted_by_simulator` is terminal. Any other transition is rejected. "blocked" and "ready_for_simulation" are eligibility results and are never stored as payment records.
+
+### 14.5 Idempotency, concurrency and audit
+
+- **Key hashing:** `idempotency_key_hash = sha256(actor | key)`, and `request_fingerprint = sha256(ticket, invoice, PO, amount, currency)`.
+- **Database-enforced uniqueness:**
+  - The unique index on `idempotency_key_hash` makes a duplicate POST a replay.
+  - The unique index on `intent_key` stops a second key for the same ticket and invoice from creating a second logical payment.
+  - Concurrent requests race on the insert, and the loser re-reads and replays or conflicts.
+  - There is no process-local idempotency store.
+- **Retries** keep the same `payment_id` and idempotency key, increment `attempts`, append a `payment_simulation_retry_requested` event, and re-check eligibility first.
+- **Audit outbox:** events are written to the record's outbox with deterministic `event_id`s, then delivered to `payment_simulation_events` and one line in the ticket audit trail (`agent_logs`, agent "Payments (simulation)").
+  - `audit_complete` becomes true only after every event is delivered.
+  - If delivery fails, the API returns 503 `AUDIT_UNAVAILABLE`, never 201.
+  - `GET /{id}` and `POST /{id}/reconcile` re-deliver missing events idempotently.
+- **Event types:** `payment_simulation_requested`, `_eligibility_passed`, `_created`, `_status_changed`, `_failed`, `_retry_requested`, `_blocked`, `_idempotent_replay`. Each event includes actor, timestamp, entity refs, correlation id, reason codes and the simulation marker. No secrets and no vendor details.
+
+### 14.6 UI
+
+- **Admin → "💸 Payments (Simulation)":**
+  - A persistent `SIMULATED — NO MONEY TRANSFERRED` banner shows on every view.
+  - Pick an approved ticket to see the eligibility panel: invoice and PO, canonical ₹ amount, match status, blockers with codes, approval id/status/approver/version, and policy-set version.
+  - The confirmation text reads "You are about to create a **simulated payment instruction** for ₹76,125.00 …". There is a confirm checkbox, and **Simulate Payment** stays disabled until it is ticked.
+  - Each (ticket, invoice) gets one idempotency key per session, so a double click replays the same payment.
+  - The receipt shows the payment id, the fake provider reference, amount, refs, the status label ("Accepted by simulator", "Simulated processing", "Simulation failed (retryable)"), the event timeline, Retry (only for failed) and a JSON download that includes the disclaimer.
+  - There is never a "Paid" label or green badge.
+- **Approver:** a read-only "Payments (Simulation, read-only)" list.
+- **User:** no payments page.
+
+### 14.7 Configuration (`.env`)
+
+```dotenv
+PAYMENT_MODE=simulation              # the only valid value; unset/invalid -> simulator unavailable
+PAYMENT_SIMULATION_ENABLED=true      # default false (safe default)
+PAYMENT_ALLOWED_CURRENCIES=INR
+PAYMENT_SIMULATOR_PROFILE=normal     # normal | processing | transient_failure (demo/test only)
+# PAYMENT_INITIATOR_ROLES=admin      # admin and/or approver; "user" is rejected
+```
+
+`tests/conftest.py` defaults to `PAYMENT_SIMULATION_ENABLED=0`, and the payment tests opt in.
+
+### 14.8 Breaking-change assessment
+
+- **Purely additive:** a new package, router, collections, indexes and UI page.
+- **Unchanged:** existing routes, schemas, statuses and approval and policy behaviour.
+- **Default state:** with the new env vars unset, the simulator is disabled (503 `SIMULATION_DISABLED`) and nothing else changes.
+- **Test updates:** two UI navigation tests were updated for the new page entry (admin and approver page lists). The no-external-execution guard now also covers `app/payments`, the payment router and repository, and asserts the Critic never imports payments.
+
+### 14.9 Verification record (2026-10-17)
+
+- **Tests:** `python -m pytest -q` gave **760 passed** (565 before + 195 new): eligibility and config/simulator 121, API and security 62, UI 14 new.
+  - Coverage includes every reason code, stale approval (policy set, PO, run_count), Decimal rejections, replay and conflict, concurrent threads creating one record, retry, audit-failure 503 then reconcile, roles, smuggled `money_transferred` / `mode` fields giving 422, amount override, the tool not bypassing approval, the Critic not importing payments, and no non-loopback sockets.
+  - pyflakes is clean, and there is no BOM or mojibake.
+- **Live run** (real MongoDB throwaway DB, real uvicorn, policy RAG and rule engine on): **28/28 API checks**.
+  - **Happy path:**
+    - Approved ticket → eligible ₹76,125.00 → 201 `accepted_by_simulator` with a `PAY-SIM-` ref.
+    - Replay gave 200 with the same payment_id. Same key with a different amount gave 409. A new key for the same intent gave 409 `ALREADY_SIMULATED`.
+    - Sending `money_transferred` gave 422 with no traceback.
+  - **Event timeline:** complete.
+  - **Roles:** approver read 200, approver create 403, user 403.
+  - **Records:** one record per ticket, the PO stays `draft`, and no record has `money_transferred: true`.
+  - **Blocked cases (no records created):** unapproved (`APPROVAL_MISSING`), INV-5002 (`INVOICE_MATCH_FAILED`), INV-4987 (`DUPLICATE_INVOICE`) and an amount override (`AMOUNT_MISMATCH`).
+  - **Restart:**
+    - The payment persisted.
+    - The `transient_failure` profile gave `failed_simulated`, then retry gave the same payment with attempts 2 and `accepted_by_simulator`, still one record. A second retry gave 409.
+    - Disabled gave 503 `SIMULATION_DISABLED`, and `PAYMENT_MODE=real` failed closed with 503.
+- **Live UI** (Streamlit AppTest against the real API): **10/10 checks** — banner, approved ticket listed, Eligible ₹76,125.00, confirmation text, button disabled until confirmed, receipt "Accepted by simulator" and `PAY-SIM-` ref, disclaimer, no "Paid" or success badge, exactly one record, approver read-only.

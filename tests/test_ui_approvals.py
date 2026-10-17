@@ -98,11 +98,11 @@ def test_navigation_per_role(backend):
     assert "Admin console" not in body and "📋 My requests" not in body
     assert not any(c[1].startswith("/api/admin") or c[1].startswith("/api/my") for c in backend.calls)
 
-    assert page_titles(at) == ["Approvals", "Policy library"]
+    assert page_titles(at) == ["Approvals", "Policy library", "Payments (Simulation, read-only)"]
 
     at = logged_in(backend, "admin")
     assert "🛠️ Admin console" in texts(at)
-    assert page_titles(at) == ["Admin console", "Approvals (read-only)", "Policy library"]
+    assert page_titles(at) == ["Admin console", "Approvals (read-only)", "Policy library", "Payments (Simulation)"]
 
     backend.calls.clear()
     at = logged_in(backend, "alice")

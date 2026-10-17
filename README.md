@@ -12,6 +12,7 @@ Execution flow, function call sequence and file dependencies: see [Docs/flow.md]
 - **Policy library (RAG):** admins upload multiple policy, vendor and rate-card PDFs. Each ticket run retrieves cited evidence (file, page, section), checks quotes against verified rate cards with Decimal arithmetic, and adds review reasons to the approval request. Approvers verify extracted rate rows. The 3 PDFs in `data/policies` are ingested automatically on first start.
 - **Dynamic policy engine (Phase 3):** business rules are reviewed, versioned data rather than code. Admins extract candidate rules from ready PDFs (LLM with deterministic fallback, cited evidence, prompt-injection flags). Approvers validate and approve or reject them; nothing activates automatically. Every ticket run evaluates the active policy-set version deterministically, and approvals are bound to that version, so a policy change makes them stale.
 - Every draft PO needs an approver's sign-off. Approval records an internal authorization only: the PO stays a draft, and no order or payment is executed.
+- **Payments (Simulation) — no money is ever transferred:** for an approved ticket with a matched invoice, an admin can create one **simulated** payment instruction on the "Payments (Simulation)" page. The backend re-checks eligibility on every request: approval current and bound to the active policy set, invoice matched, no duplicate or policy block, canonical Decimal amount, allow-listed currency. It is idempotent (same key → same payment; changed payload → 409) and fully audited. A local deterministic simulator returns an "Accepted by simulator" receipt with a fake `PAY-SIM-…` reference. There is no bank or gateway SDK and no network call, and every response says `mode: "SIMULATION"`, `money_transferred: false`. Disabled unless `PAYMENT_MODE=simulation` and `PAYMENT_SIMULATION_ENABLED=true`. Approvers can view payments read-only; users can't see them.
 
 ## Run
 ```powershell
@@ -39,6 +40,7 @@ Stop-Process -Id <PID>
 - `ADMIN_USERNAME`, `ADMIN_PASSWORD`: the admin account is created or updated at API startup. If unset there is no admin; there is no default password.
 - `POLICY_RAG_ENABLED` (default on), `POLICY_RAG_SEED` (default on), `POLICY_STORE_DIR` (default `data/policy_store`, git-ignored). Thresholds live in `data/policy_rag_config.json`. Embeddings use the OpenAI key (`text-embedding-3-small`); offline, the system falls back to local vectors.
 - `POLICY_RULES_ENABLED` (default on): evaluate the active rule set on each run. `POLICY_RULES_BOOTSTRAP` (default on): load `data/policy_rules_seed.json` at startup.
+- `PAYMENT_MODE` (only `simulation` is valid; unset or anything else keeps the simulator off), `PAYMENT_SIMULATION_ENABLED` (default `false`), `PAYMENT_ALLOWED_CURRENCIES` (default `INR`), `PAYMENT_SIMULATOR_PROFILE` (`normal` | `processing` | `transient_failure`), and optionally `PAYMENT_INITIATOR_ROLES` (default `admin`). There is no real-payment mode.
 - `APPROVER_ACCOUNTS`: approver accounts as `user:password[,user2:password2]`, created at API startup. Demo auth only; approvers can't self-register, and an existing user or admin is never escalated.
 - `SESSION_TTL_HOURS` (default 8): login session lifetime. Optional: `ADMIN_NAME`, `ADMIN_EMAIL`.
 - `WORKPLACEOPS_PERSISTENCE`: `required` (default; DB write failures return 503) or `disabled` (no database).
@@ -66,6 +68,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 - `app/services/`: ticket service (submit, run, decide, notes, resubmit; persistence).
 - `app/policy_rag/`: PDF ingestion, chunking, embeddings, hybrid retrieval, rate cards and policy evaluation. Routes: `app/routers/policy_documents.py`, `app/routers/policy_search.py`.
 - `app/policy_rules/`: rule schema and restricted language, fact registry, evaluator, registry (lifecycle and active policy set), extraction and engine. Routes: `app/routers/policy_rules.py`.
+- `app/payments/`: simulation-only payment initiator: config (fail closed), eligibility gate, deterministic local simulator, service (idempotency, state machine, audit outbox), metrics and the narrow `create_simulated_payment` tool. Routes: `app/routers/payments.py` (`/api/payments/simulation*`). Persistence: `app/repositories/payment_repository.py`. UI: `ui/pages_portal/payments.py`.
 - `app/approvals/`: Phase 2 approval policy (deterministic), versioned approval requests and decisions. `app/routers/approvals.py` holds `/api/approvals*`.
 - `app/repositories/`, `app/db/`: the MongoDB data-access layer and shared client.
 - `ui/app.py`: Streamlit entry point (login, User portal, Admin console in `ui/pages_portal/`). `ui/streamlit_app.py` is a shim that runs it.

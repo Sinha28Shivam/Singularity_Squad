@@ -16,7 +16,7 @@ if str(_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from ui.lib.api import API_BASE, api_post, clear_session, current_user, fetch_health, fetch_invoices  # noqa: E402
-from ui.pages_portal import admin_console, approvals, login, policy_library, user_portal  # noqa: E402
+from ui.pages_portal import admin_console, approvals, login, payments, policy_library, user_portal  # noqa: E402
 
 DISCLAIMER = (
     "**Prototype on synthetic data · Draft-only.** Purchase orders stay drafts, nothing is purchased "
@@ -79,11 +79,13 @@ def main() -> None:
             st.Page(admin_console.render, title="Admin console", icon="🛠️", url_path="admin", default=True),
             st.Page(approvals.render, title="Approvals (read-only)", icon="🛡️", url_path="approvals"),
             st.Page(policy_library.render, title="Policy library", icon="📚", url_path="policy-library"),
+            st.Page(payments.render, title="Payments (Simulation)", icon="💸", url_path="payments"),
         ]
     elif user.get("role") == "approver":
         pages = [
             st.Page(approvals.render, title="Approvals", icon="🛡️", url_path="approvals", default=True),
             st.Page(policy_library.render, title="Policy library", icon="📚", url_path="policy-library"),
+            st.Page(payments.render, title="Payments (Simulation, read-only)", icon="💸", url_path="payments"),
         ]
     else:
         pages = [st.Page(user_portal.render, title="My requests", icon="📋", url_path="my-requests", default=True)]

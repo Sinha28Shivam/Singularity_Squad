@@ -107,3 +107,7 @@ __all__ += ["policy_chunk_repository", "policy_document_repository"]
 from app.repositories import policy_rule_repository  # noqa: E402
 
 __all__ += ["policy_rule_repository"]
+
+from app.repositories import payment_repository  # noqa: E402
+
+__all__ += ["payment_repository"]

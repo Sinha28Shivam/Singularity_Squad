@@ -75,6 +75,20 @@ def _ensure_policy_rule_indexes(db: Database) -> None:
     db.policy_rule_events.create_index([("rule_id", ASCENDING), ("created_at", ASCENDING)], name="rule_event_rule")
 
 
+def _ensure_payment_simulation_indexes(db: Database) -> None:
+    """Dummy payment initiator (SIMULATION ONLY): unique indexes make duplicate logical payments impossible."""
+    sims = db.payment_simulations
+    sims.create_index([("payment_id", ASCENDING)], unique=True, name="payment_id_unique")
+    sims.create_index([("idempotency_key_hash", ASCENDING)], unique=True, name="idempotency_key_hash_unique")
+    sims.create_index([("intent_key", ASCENDING)], unique=True, name="intent_key_unique")
+    sims.create_index([("ticket_id", ASCENDING), ("created_at", DESCENDING)], name="payment_ticket_created")
+    sims.create_index([("status", ASCENDING)], name="payment_status")
+    events = db.payment_simulation_events
+    events.create_index([("event_id", ASCENDING)], unique=True, name="payment_event_id_unique")
+    events.create_index([("payment_id", ASCENDING), ("at", ASCENDING)], name="payment_event_payment_at")
+    events.create_index([("ticket_id", ASCENDING)], name="payment_event_ticket")
+
+
 def ensure_indexes(db: Optional[Database] = None) -> None:
     db = db if db is not None else get_database()
     try:
@@ -97,5 +111,6 @@ def ensure_indexes(db: Optional[Database] = None) -> None:
         _ensure_policy_rag_b_indexes(db)
         _ensure_policy_rag_a_indexes(db)
         _ensure_policy_rule_indexes(db)
+        _ensure_payment_simulation_indexes(db)
     except PyMongoError as exc:
         raise PersistenceError("Database unavailable: could not initialize indexes. Please try again later.") from exc

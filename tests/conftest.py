@@ -18,6 +18,13 @@ def _offline_mongomock(request, monkeypatch, tmp_path_factory):
     monkeypatch.setenv("POLICY_RULES_ENABLED", "0")
     monkeypatch.setenv("POLICY_RULES_BOOTSTRAP", "0")
     monkeypatch.setenv("POLICY_STORE_DIR", str(tmp_path_factory.mktemp("policy_store")))
+    # Dummy payment SIMULATOR: valid config but disabled unless a test opts in (PAYMENT_SIMULATION_ENABLED=1).
+    monkeypatch.setenv("PAYMENT_MODE", "simulation")
+    monkeypatch.setenv("PAYMENT_SIMULATION_ENABLED", "0")
+    monkeypatch.setenv("PAYMENT_ALLOWED_CURRENCIES", "INR")
+    monkeypatch.setenv("PAYMENT_SIMULATOR_PROFILE", "normal")
+    for var in ("PAYMENT_INITIATOR_ROLES", "APP_ENV", "ENVIRONMENT"):
+        monkeypatch.delenv(var, raising=False)
     if request.node.get_closest_marker("real_mongo"):
         yield
         return

@@ -20,9 +20,46 @@ FORBIDDEN_NAMES = {"send_po", "submit_order", "place_order", "pay_invoice", "cre
                    "send_email"}
 
 
-def _files():
-    for p in GUARDED:
+def _files(paths=GUARDED):
+    for p in paths:
         yield from ([p] if p.is_file() else sorted(p.rglob("*.py")))
+
+
+# Dummy payment initiator (SIMULATION ONLY): no network/provider SDK, no billing/procurement execution.
+PAYMENT_GUARDED = [ROOT / "app" / "payments", ROOT / "app" / "routers" / "payments.py",
+                   ROOT / "app" / "repositories" / "payment_repository.py"]
+PAYMENT_FORBIDDEN_MODULES = {"requests", "httpx", "urllib.request", "urllib3", "http.client", "smtplib", "socket",
+                             "aiohttp", "app.agents.billing", "app.agents.procurement"}
+PAYMENT_PROVIDER_PATTERN = ("stripe", "razorpay", "paypal", "braintree", "adyen")
+
+
+def _imported_modules(path):
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            yield from (a.name for a in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            yield node.module or ""
+            yield from (f"{node.module}.{a.name}" for a in node.names)
+
+
+def test_payment_modules_import_no_network_or_provider_sdk():
+    files = list(_files(PAYMENT_GUARDED))
+    assert any(p.name == "simulator.py" for p in files) and any(p.name == "payments.py" for p in files)
+    for path in files:
+        for mod in _imported_modules(path):
+            root_mod = mod.split(".")[0]
+            assert mod not in PAYMENT_FORBIDDEN_MODULES and root_mod not in {"requests", "httpx", "socket",
+                                                                             "smtplib", "aiohttp", "urllib3"}, \
+                f"{path.name} imports {mod}"
+            assert not any(p in mod.lower() for p in PAYMENT_PROVIDER_PATTERN), f"{path.name} imports {mod}"
+
+
+def test_critic_does_not_import_payments():
+    for mod in _imported_modules(ROOT / "app" / "agents" / "critic.py"):
+        assert not mod.startswith("app.payments"), mod
+    text = (ROOT / "app" / "agents" / "critic.py").read_text(encoding="utf-8")
+    assert "payments" not in text and "create_simulated_payment" not in text
 
 
 def test_guarded_modules_import_no_execution_paths():

@@ -248,8 +248,10 @@ def all_text(at: AppTest) -> str:
 
 # --------------------------------------------------------------------------- navigation
 def test_navigation_per_role(backend):
-    assert page_titles(logged_in(backend, "admin")) == ["Admin console", "Approvals (read-only)", "Policy library"]
-    assert page_titles(logged_in(backend, "carol")) == ["Approvals", "Policy library"]
+    assert page_titles(logged_in(backend, "admin")) == ["Admin console", "Approvals (read-only)", "Policy library",
+                                                         "Payments (Simulation)"]
+    assert page_titles(logged_in(backend, "carol")) == ["Approvals", "Policy library",
+                                                         "Payments (Simulation, read-only)"]
     assert page_titles(logged_in(backend, "alice")) == ["My requests"]
     at = library(backend, "alice")
     assert "admins and approvers only" in texts(at)
