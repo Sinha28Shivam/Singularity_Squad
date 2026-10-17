@@ -37,6 +37,24 @@ def get_delivery(delivery_id: str) -> DeliveryRecord | None:
     return next((d for d in load_deliveries() if d.delivery_id == delivery_id), None)
 
 
+DEMO_PO_PLACEHOLDER = "DRAFT-PO-1001"
+
+
+def bind_demo_documents(invoice: Invoice, delivery: DeliveryRecord | None,
+                        po: DraftPO) -> tuple[Invoice, DeliveryRecord | None, bool]:
+    """Synthetic invoices/deliveries reference the placeholder PO number; point them at the current draft PO.
+
+    Only the PO number is rebound. Vendor, quantities, rates, delivery and duplicate checks still apply.
+    Returns copies (seed data is never mutated) and whether a rebind happened.
+    """
+    if invoice.po_id != DEMO_PO_PLACEHOLDER or po.po_id == DEMO_PO_PLACEHOLDER:
+        return invoice, delivery, False
+    invoice = invoice.model_copy(update={"po_id": po.po_id})
+    if delivery is not None and delivery.po_id == DEMO_PO_PLACEHOLDER:
+        delivery = delivery.model_copy(update={"po_id": po.po_id})
+    return invoice, delivery, True
+
+
 def _key(s: str) -> str:
     return s.strip().lower()
 

@@ -1,20 +1,53 @@
 """FastAPI entrypoint. Run: python -m uvicorn app.main:app --reload"""
 from __future__ import annotations
 
+import logging
+from contextlib import asynccontextmanager
 from datetime import date
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Path, Query, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app import llm
 from app.agents import billing, policy
 from app.data_loader import load_json
-from app.orchestrator import run_workflow
+from app.db import PersistenceError, close_client, ensure_indexes, persistence_mode, ping_database
+from app.db.mongo import db_status
+from app.repositories import get_audit_entries, get_ticket, list_recent_tickets
 from app.schemas import DraftPO, ReconciliationReport, WorkflowResult
+from app.services import ticket_service
 
-app = FastAPI(title="WorkplaceOps AI", version="0.1.0",
+logger = logging.getLogger(__name__)
+
+TICKET_ID_PATTERN = r"^REQ-[A-Za-z0-9-]{1,64}$"
+_DISABLED_MSG = "Persistence is disabled"
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    if persistence_mode() == "required":
+        try:
+            ping_database()
+            ensure_indexes()
+        except Exception as exc:  # noqa: BLE001 - start anyway; health reports unavailable
+            logger.warning("MongoDB not reachable at startup (%s); persistence endpoints will return 503.",
+                           type(exc).__name__)
+    try:
+        yield
+    finally:
+        close_client()
+
+
+app = FastAPI(title="WorkplaceOps AI", version="0.1.0", lifespan=lifespan,
               description="Multi-agent workplace operations copilot (synthetic demo, draft-only).")
+
+
+@app.exception_handler(PersistenceError)
+async def _persistence_error_handler(_: Request, exc: PersistenceError):
+    logger.error("Persistence error (%s)", type(exc).__name__)
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
 class WorkflowIn(BaseModel):
@@ -28,9 +61,14 @@ class ReconcileIn(BaseModel):
     invoice_id: str
 
 
+def _require_persistence() -> None:
+    if persistence_mode() == "disabled":
+        raise HTTPException(503, _DISABLED_MSG)
+
+
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "llm_enabled": llm.llm_enabled(), "model": llm.model_name()}
+    return {"status": "ok", "llm_enabled": llm.llm_enabled(), "model": llm.model_name(), **db_status()}
 
 
 @app.get("/api/samples")
@@ -48,7 +86,34 @@ def invoices():
 def workflow(body: WorkflowIn):
     if not body.text.strip():
         raise HTTPException(400, "Request text is empty.")
-    return run_workflow(body.text, body.today, body.invoice_id)
+    try:
+        return ticket_service.run_and_persist(body.text, body.today, body.invoice_id)
+    except PersistenceError as exc:
+        raise HTTPException(503, str(exc)) from None
+
+
+@app.get("/api/tickets")
+def tickets(limit: int = Query(20, ge=1, le=100)):
+    _require_persistence()
+    return {"tickets": list_recent_tickets(limit)}
+
+
+@app.get("/api/tickets/{ticket_id}")
+def ticket(ticket_id: str = Path(..., pattern=TICKET_ID_PATTERN)):
+    _require_persistence()
+    doc = get_ticket(ticket_id)
+    if doc is None:
+        raise HTTPException(404, f"Ticket {ticket_id} not found.")
+    return doc
+
+
+@app.get("/api/tickets/{ticket_id}/audit")
+def ticket_audit(ticket_id: str = Path(..., pattern=TICKET_ID_PATTERN),
+                 limit: int = Query(500, ge=1, le=500)):
+    _require_persistence()
+    if get_ticket(ticket_id) is None:
+        raise HTTPException(404, f"Ticket {ticket_id} not found.")
+    return {"ticket_id": ticket_id, "events": get_audit_entries(ticket_id, limit)}
 
 
 @app.post("/api/reconcile", response_model=ReconciliationReport)
@@ -56,5 +121,5 @@ def reconcile(body: ReconcileIn):
     inv = billing.get_invoice(body.invoice_id)
     if inv is None:
         raise HTTPException(404, f"Invoice {body.invoice_id} not found.")
-    return billing.reconcile(inv, body.po, billing.get_delivery(inv.delivery_id),
-                             billing.load_history(), policy.load_rules())
+    inv, delivery, _ = billing.bind_demo_documents(inv, billing.get_delivery(inv.delivery_id), body.po)
+    return billing.reconcile(inv, body.po, delivery, billing.load_history(), policy.load_rules())

@@ -72,6 +72,9 @@ def required_approver(total: float, rules: PolicyRules) -> str:
 
 
 def _po_id(request_id: str) -> str:
+    # Unique ticket IDs (REQ-20261017-9F3A1C) must map 1:1 to PO IDs, so keep the whole suffix.
+    if request_id and request_id.startswith("REQ-") and len(request_id) > 4:
+        return "DRAFT-PO-" + request_id[4:]
     m = re.search(r"(\d+)\s*$", request_id or "")
     return "DRAFT-PO-" + (m.group(1) if m else (request_id or "0000"))
 

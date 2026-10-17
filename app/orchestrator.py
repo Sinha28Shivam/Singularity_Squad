@@ -89,8 +89,13 @@ def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[s
             if inv is None:
                 audit.log("Billing Guardian", "reconcile", "fail", f"Invoice {invoice_id} not found.")
             else:
-                rec = billing.reconcile(inv, proc.po, billing.get_delivery(inv.delivery_id),
-                                        billing.load_history(), rules)
+                inv, delivery, rebound = billing.bind_demo_documents(
+                    inv, billing.get_delivery(inv.delivery_id), proc.po)
+                if rebound:
+                    audit.log("Billing Guardian", "bind_demo_invoice", "info",
+                              f"Synthetic invoice {inv.invoice_id} references placeholder "
+                              f"{billing.DEMO_PO_PLACEHOLDER}; bound to {proc.po.po_id} for this ticket.")
+                rec = billing.reconcile(inv, proc.po, delivery, billing.load_history(), rules)
                 result.reconciliation = rec
                 audit.log("Billing Guardian", "reconcile", "pass" if rec.status == "match" else "fail",
                           f"{rec.invoice_id}: {rec.status}; expected INR {rec.expected_total:,.2f}, "

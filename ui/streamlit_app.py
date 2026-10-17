@@ -11,6 +11,8 @@ import os
 from datetime import date, datetime, timezone
 from typing import Any, Optional
 
+from urllib.parse import quote
+
 import requests
 import streamlit as st
 
@@ -92,26 +94,65 @@ def worst(statuses: list[Optional[str]]) -> Optional[str]:
     return max(statuses, key=lambda s: SEVERITY.get(s, 1))
 
 
-def api_get(path: str) -> Any:
-    resp = requests.get(f"{API_BASE}{path}", timeout=10)
-    resp.raise_for_status()
+class ApiError(Exception):
+    """Friendly backend error carrying the HTTP status code and the backend's `detail` message."""
+
+    def __init__(self, status_code: int, detail: str) -> None:
+        super().__init__(f"HTTP {status_code}: {detail}")
+        self.status_code = status_code
+        self.detail = detail
+
+
+def _extract_detail(resp: Any) -> str:
+    try:
+        body = resp.json()
+    except Exception:
+        body = None
+    if isinstance(body, dict) and body.get("detail") is not None:
+        detail = body["detail"]
+        if isinstance(detail, list):  # FastAPI validation errors
+            detail = "; ".join(str(d.get("msg", d)) if isinstance(d, dict) else str(d) for d in detail)
+        return str(detail)[:500]
+    text = getattr(resp, "text", "") or ""
+    # Never surface HTML pages or tracebacks verbatim.
+    if "Traceback" in text or text.lstrip().startswith("<"):
+        return "The backend reported an internal error."
+    return text[:500] or "No details provided."
+
+
+def _handle(resp: Any) -> Any:
+    status = int(getattr(resp, "status_code", 200) or 200)
+    if status >= 400:
+        raise ApiError(status, _extract_detail(resp))
     return resp.json()
+
+
+def api_get(path: str, params: Optional[dict] = None) -> Any:
+    return _handle(requests.get(f"{API_BASE}{path}", params=params, timeout=10))
 
 
 def api_post(path: str, payload: dict) -> Any:
-    resp = requests.post(f"{API_BASE}{path}", json=payload, timeout=TIMEOUT)
-    resp.raise_for_status()
-    return resp.json()
+    return _handle(requests.post(f"{API_BASE}{path}", json=payload, timeout=TIMEOUT))
+
+
+def friendly_error(exc: Exception) -> str:
+    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
+        return BACKEND_HELP
+    if isinstance(exc, ApiError):
+        if exc.status_code == 404:
+            return "Ticket not found."
+        if exc.status_code == 422:
+            return "Invalid ticket ID format (expected e.g. `REQ-20261017-9F3A1C2B`)."
+        if exc.status_code == 503:
+            return f"⛔ {exc.detail or 'Database unavailable.'}"
+        return f"Backend returned HTTP {exc.status_code}: {exc.detail}"
+    if isinstance(exc, requests.HTTPError) and exc.response is not None:
+        return f"Backend returned HTTP {exc.response.status_code}: {_extract_detail(exc.response)}"
+    return f"Unexpected error talking to backend ({type(exc).__name__})."
 
 
 def show_api_error(exc: Exception) -> None:
-    if isinstance(exc, (requests.ConnectionError, requests.Timeout)):
-        st.error(BACKEND_HELP)
-    elif isinstance(exc, requests.HTTPError) and exc.response is not None:
-        detail = exc.response.text[:1500]
-        st.error(f"Backend returned HTTP {exc.response.status_code}:\n\n```\n{detail}\n```")
-    else:
-        st.error(f"Unexpected error talking to backend: {exc}")
+    st.error(friendly_error(exc))
 
 
 @st.cache_data(ttl=15, show_spinner=False)
@@ -120,6 +161,17 @@ def fetch_health() -> Optional[dict]:
         return api_get("/api/health")
     except Exception:
         return None
+
+
+@st.cache_data(ttl=15, show_spinner=False)
+def fetch_tickets(limit: int = 20) -> tuple[list, Optional[str]]:
+    """Return (tickets, error_message)."""
+    try:
+        data = api_get("/api/tickets", params={"limit": limit})
+        tickets = data.get("tickets") if isinstance(data, dict) else None
+        return (tickets if isinstance(tickets, list) else []), None
+    except Exception as exc:
+        return [], friendly_error(exc)
 
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -493,11 +545,47 @@ def tab_critic_audit(result: dict) -> None:
     else:
         st.caption("Critic did not run.")
 
-    st.subheader("Audit trail")
+    st.subheader("Audit trail (this run, in memory)")
     audit = result.get("audit_trail") or []
     if not audit:
         st.caption("No audit entries.")
+    else:
+        render_audit_events(audit)
+        st.download_button(
+            "⬇️ Download audit report (JSON)",
+            data=json.dumps(
+                {"ticket_id": result.get("ticket_id"), "final_status": result.get("final_status"),
+                 "critic": critic, "audit_trail": audit, "disclaimer": result.get("disclaimer")},
+                indent=2, ensure_ascii=False,
+            ),
+            file_name="workplaceops_audit.json",
+            mime="application/json",
+            key="dl_audit_mem",
+        )
+    render_saved_audit()
+
+
+def render_saved_audit() -> None:
+    saved = st.session_state.get("saved_audit")
+    if not saved:
         return
+    st.subheader("🗄️ Saved audit history (from database)")
+    events = [dict(e, step=e.get("sequence", e.get("step"))) for e in saved.get("events") or []]
+    st.caption(f"Ticket `{saved.get('ticket_id')}` · {len(events)} event(s) loaded from the database.")
+    if not events:
+        st.caption("No saved audit events for this ticket.")
+        return
+    render_audit_events(events)
+    st.download_button(
+        "⬇️ Download saved audit history (JSON)",
+        data=json.dumps(saved, indent=2, ensure_ascii=False, default=str),
+        file_name=f"{saved.get('ticket_id', 'ticket')}_audit.json",
+        mime="application/json",
+        key="dl_audit_saved",
+    )
+
+
+def render_audit_events(audit: list[dict]) -> None:
     rows = [
         {
             "Step": a.get("step"),
@@ -517,16 +605,6 @@ def tab_critic_audit(result: dict) -> None:
             st.markdown(f"{icon(a.get('status'))} {a.get('detail', '')}")
             st.markdown(evidence_md(a.get("evidence") or []))
             st.caption(f"{a.get('timestamp', '')} · LLM used: {bool(a.get('llm_used'))}")
-    st.download_button(
-        "⬇️ Download audit report (JSON)",
-        data=json.dumps(
-            {"final_status": result.get("final_status"), "critic": critic, "audit_trail": audit,
-             "disclaimer": result.get("disclaimer")},
-            indent=2, ensure_ascii=False,
-        ),
-        file_name="workplaceops_audit.json",
-        mime="application/json",
-    )
 
 
 # --------------------------------------------------------------------------- page
@@ -548,6 +626,17 @@ def sidebar() -> tuple[date, Optional[str]]:
                 st.caption(f"🤖 LLM enabled · model `{health.get('model', '?')}`")
             else:
                 st.caption("🧮 Deterministic fallback (no LLM)")
+            db = health.get("database")
+            db_icon = {"connected": "🟢", "unavailable": "🔴", "disabled": "⚪"}.get(db, "❔")
+            persistence = health.get("persistence")
+            st.caption(f"{db_icon} Database: {db or 'unknown'}"
+                       + (f" · persistence {persistence}" if persistence else ""))
+            if db == "unavailable" and persistence == "required":
+                st.warning("Database unavailable — new workflow runs will be rejected until it is back.")
+            if st.button("Refresh status"):
+                fetch_health.clear()
+                fetch_tickets.clear()
+                st.rerun()
 
         today = st.date_input("Demo date (today)", value=DEFAULT_TODAY)
 
@@ -573,8 +662,126 @@ def sidebar() -> tuple[date, Optional[str]]:
             "Invoice", list(INVOICE_LABELS.keys()), index=1, format_func=lambda x: INVOICE_LABELS[x]
         )
         st.divider()
+        ticket_sidebar()
+        st.divider()
         st.caption("All data is synthetic. Outputs are drafts; humans make every decision.")
     return today, invoice_id
+
+
+def load_ticket(ticket_id: str) -> None:
+    try:
+        data = api_get(f"/api/tickets/{quote(ticket_id, safe='')}")
+    except Exception as exc:
+        st.session_state["ticket_msg"] = ("error", friendly_error(exc))
+        return
+    if not isinstance(data, dict):
+        st.session_state["ticket_msg"] = ("error", "Unexpected response from backend.")
+        return
+    loaded = {k: data.get(k) for k in ("ticket_id", "status", "created_at", "updated_at", "schema_version")}
+    loaded["ticket_id"] = loaded.get("ticket_id") or ticket_id
+    st.session_state["loaded_ticket"] = loaded
+    saved = st.session_state.get("saved_audit")
+    if saved and saved.get("ticket_id") != loaded["ticket_id"]:
+        st.session_state.pop("saved_audit", None)
+    st.session_state.pop("recon_override", None)
+    wr = data.get("workflow_result")
+    if isinstance(wr, dict) and wr:
+        wr = dict(wr)
+        wr.setdefault("ticket_id", loaded["ticket_id"])
+        wr.setdefault("persisted", True)
+        st.session_state["result"] = wr
+        st.session_state["ticket_msg"] = ("success", f"Loaded ticket `{loaded['ticket_id']}` from the database.")
+    else:
+        st.session_state.pop("result", None)
+        st.session_state["ticket_msg"] = (
+            "warning",
+            f"Ticket `{loaded['ticket_id']}` has no saved workflow result (status: "
+            f"**{loaded.get('status') or 'unknown'}**). The run may have failed before completion.",
+        )
+
+
+def load_audit(ticket_id: str) -> None:
+    try:
+        data = api_get(f"/api/tickets/{quote(ticket_id, safe='')}/audit", params={"limit": 500})
+    except Exception as exc:
+        st.session_state["ticket_msg"] = ("error", friendly_error(exc))
+        return
+    events = data.get("events") if isinstance(data, dict) else None
+    events = sorted(events or [], key=lambda e: (e.get("sequence") is None, e.get("sequence") or 0))
+    tid = (data.get("ticket_id") if isinstance(data, dict) else None) or ticket_id
+    st.session_state["saved_audit"] = {"ticket_id": tid, "events": events}
+    st.session_state["ticket_msg"] = (
+        "success", f"Loaded {len(events)} saved audit event(s) for `{tid}` — see **6. Critic & Audit**."
+    )
+
+
+def ticket_sidebar() -> None:
+    st.subheader("🗄️ Saved tickets")
+    pending = st.session_state.pop("_pending_ticket_id", None)
+    if pending:
+        st.session_state["ticket_id_input"] = pending
+
+    tickets, err = fetch_tickets(20)
+    labels = {
+        t.get("ticket_id"): f"{t.get('ticket_id')} · {t.get('final_status') or t.get('status') or '?'}"
+        for t in tickets if isinstance(t, dict) and t.get("ticket_id")
+    }
+
+    def _pick() -> None:
+        tid = st.session_state.get("recent_ticket")
+        if tid:
+            st.session_state["ticket_id_input"] = tid
+
+    c1, c2 = st.columns([5, 1], vertical_alignment="bottom")
+    c1.selectbox(
+        "Recent tickets",
+        [None] + list(labels.keys()),
+        format_func=lambda t: "(select a ticket)" if t is None else labels.get(t, t),
+        key="recent_ticket",
+        on_change=_pick,
+    )
+    if c2.button("🔄", help="Refresh recent tickets"):
+        fetch_tickets.clear()
+        st.rerun()
+    if err:
+        st.caption("Recent tickets unavailable (backend offline)." if err == BACKEND_HELP else err)
+    elif not labels:
+        st.caption("No saved tickets yet.")
+
+    st.text_input("Ticket ID", key="ticket_id_input", placeholder="REQ-20261017-9F3A1C2B")
+    tid = (st.session_state.get("ticket_id_input") or "").strip()
+    b1, b2 = st.columns(2)
+    if b1.button("📂 Load ticket", width="stretch", disabled=not tid):
+        load_ticket(tid)
+    if b2.button("📜 Load audit", width="stretch", disabled=not tid, help="Load audit history from the database"):
+        load_audit(tid)
+    msg = st.session_state.pop("ticket_msg", None)
+    if msg:
+        kind, text = msg
+        {"error": st.error, "warning": st.warning}.get(kind, st.success)(text)
+    st.caption("The database is the source of truth; this page only caches display data in the session.")
+
+
+def render_ticket_banner(result: dict) -> None:
+    ticket_id = result.get("ticket_id")
+    if not ticket_id:
+        return
+    loaded = st.session_state.get("loaded_ticket") or {}
+    with st.container(border=True):
+        c1, c2 = st.columns([2, 3])
+        with c1:
+            st.markdown("**🎫 Ticket ID**")
+            st.code(ticket_id, language=None)
+        with c2:
+            if loaded.get("ticket_id") == ticket_id:
+                st.success(
+                    f"📂 Loaded from database · status **{loaded.get('status') or '?'}** · "
+                    f"created {loaded.get('created_at') or '?'}"
+                )
+            elif result.get("persisted"):
+                st.success("💾 Saved to database — reload it any time with this ticket ID.")
+            else:
+                st.warning("⚠️ Not persisted — this result exists only in this browser session.")
 
 
 def main() -> None:
@@ -605,14 +812,30 @@ def main() -> None:
                         {"text": text, "today": today.isoformat() if today else None, "invoice_id": invoice_id},
                     )
                 st.session_state.pop("recon_override", None)
+                st.session_state.pop("saved_audit", None)
+                st.session_state.pop("loaded_ticket", None)
+                new_id = (st.session_state.get("result") or {}).get("ticket_id")
+                if new_id:
+                    st.session_state["_pending_ticket_id"] = new_id
+                fetch_tickets.clear()
             except Exception as exc:
                 show_api_error(exc)
 
     result = st.session_state.get("result")
     if not result:
-        st.info("Pick a sample (sidebar) or type a request, then click **Run workflow**.")
+        loaded = st.session_state.get("loaded_ticket")
+        if loaded:
+            st.warning(
+                f"Ticket `{loaded.get('ticket_id')}` · status **{loaded.get('status') or 'unknown'}** · "
+                f"created {loaded.get('created_at') or '?'} — no saved workflow result to display."
+            )
+        if st.session_state.get("saved_audit"):
+            render_saved_audit()
+        elif not loaded:
+            st.info("Pick a sample (sidebar) or type a request, then click **Run workflow**.")
         return
 
+    render_ticket_banner(result)
     st.subheader("Agent pipeline")
     render_pipeline(result)
     st.write("")

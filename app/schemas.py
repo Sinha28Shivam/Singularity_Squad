@@ -184,6 +184,8 @@ class CriticReport(BaseModel):
 
 
 class WorkflowResult(BaseModel):
+    ticket_id: Optional[str] = None  # set by the API layer when the run is persisted
+    persisted: bool = False
     request: Optional[EventRequest] = None
     missing_fields: list[str] = Field(default_factory=list)
     clarification_questions: list[str] = Field(default_factory=list)
