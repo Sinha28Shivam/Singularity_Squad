@@ -1,11 +1,13 @@
 """Manager / Orchestrator: owns workflow state, delegates to specialist agents, records the audit trail."""
 from __future__ import annotations
 
+import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional
 
 from app.agents import billing, critic, intake, policy, procurement, vendor_matcher
-from app.schemas import AuditEntry, CheckResult, Evidence, WorkflowResult
+from app.schemas import AuditEntry, CheckResult, Evidence, PolicyReport, VendorMatchResult, WorkflowResult
 
 
 class _Audit:
@@ -28,6 +30,28 @@ def _worst(checks: list[CheckResult]) -> str:
     return "pass"
 
 
+def _analyze_in_parallel(req, today: date, rules) -> tuple[PolicyReport, VendorMatchResult]:
+    """Run independent policy evaluation and vendor matching concurrently.
+
+    Results are returned in a fixed order so audit serialization remains deterministic.
+    Set WORKPLACEOPS_PARALLEL_ANALYSIS=0 to fall back to sequential execution.
+    """
+    parallel = os.getenv("WORKPLACEOPS_PARALLEL_ANALYSIS", "1").strip().lower() not in {
+        "0", "false", "no", "off"
+    }
+    if not parallel:
+        return policy.evaluate(req, today), vendor_matcher.match_vendors(req, rules)
+
+    # These analyses share only immutable request/rule inputs and perform no writes.
+    # Keep this bounded to two workers; dependent PO/invoice work remains sequential.
+    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="workplaceops-analysis") as pool:
+        policy_future = pool.submit(policy.evaluate, req, today)
+        vendor_future = pool.submit(vendor_matcher.match_vendors, req, rules)
+        policy_result = policy_future.result()
+        vendor_result = vendor_future.result()
+    return policy_result, vendor_result
+
+
 def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[str] = None,
                  request_id: str = "REQ-1001") -> WorkflowResult:
     today = today or date.today()
@@ -46,17 +70,15 @@ def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[s
         audit.log("Orchestrator", "clarify", "info", "Stopping: asking requester for missing mandatory fields.")
         return _finish(result, audit)
 
-    # 3. Policy check
+    # 3-4. Independent analyses run concurrently; PO generation waits for both results.
     rules = policy.load_rules()
-    pol = policy.evaluate(req, today)
+    pol, vm = _analyze_in_parallel(req, today, rules)
     result.policy = pol
     audit.log("Policy Advisor", "evaluate_policy", _worst(pol.checks),
               "; ".join(f"{c.name}={c.status}" for c in pol.checks),
               evidence=[Evidence(source=f"policy:{c.clause_id}", detail=c.title) for c in pol.clauses])
     policy_blocked = any(c.status == "fail" for c in pol.checks)
 
-    # 4. Planning & vendor matching (re-plans to an alternative when the first choice is infeasible)
-    vm = vendor_matcher.match_vendors(req, rules)
     result.vendors = vm
     audit.log("Planner & Vendor Matcher", "match_vendors", "pass" if vm.selected else "fail",
               vm.explanation,
@@ -66,7 +88,7 @@ def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[s
     if vm.replanned:
         audit.log("Orchestrator", "replan", "warn", "First-choice vendor infeasible; plan revised to an eligible alternative.")
 
-    # 5-7. Costing, budget & approval, draft PO
+    # 5-7. Costing, budget & approval, draft PO (dependent on both analyses)
     proc = procurement.build_draft_po(req, vm.selected, rules)
     if policy_blocked and proc.po is not None:
         proc.po = None
@@ -80,7 +102,7 @@ def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[s
                if proc.po else "No draft PO created.") + " | " + " ; ".join(proc.calculation_steps),
               evidence=[e for c in proc.checks for e in c.evidence])
 
-    # 8. Invoice reconciliation
+    # 8. Invoice reconciliation depends on the draft PO and therefore stays sequential.
     if invoice_id:
         if proc.po is None:
             audit.log("Billing Guardian", "reconcile", "uncertain", "Skipped: no draft PO to reconcile against.")
