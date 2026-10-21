@@ -21,6 +21,10 @@ def search_vendors(query: str = "", service: Optional[str] = None,
             continue
         if service_filter and service_filter not in [s.casefold() for s in raw.get("services", [])]:
             continue
+        if status == "approved" and not raw.get("approved"):
+            continue
+        if status in {"pending_review", "rejected", "suspended"}:
+            continue
         internal.append({
             "vendor_id": raw["vendor_id"], "name": raw["name"], "approved": bool(raw.get("approved")),
             "services": raw.get("services", []), "capacity": raw.get("capacity"),
