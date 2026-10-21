@@ -1,6 +1,23 @@
+from datetime import date, datetime, timezone
+
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.repositories.ticket_repository import create_ticket
+from app.schemas import EventRequest, WorkflowResult
+
+
+def _seed_validated_ticket(request_id="REQ-RFQ-TEST-100"):
+    now = datetime.now(timezone.utc)
+    request = EventRequest(
+        request_id=request_id, service="lunch", date=date(2026, 12, 15),
+        attendees=100, budget_limit=100000, currency="INR", location="Delhi NCR office"
+    )
+    result = WorkflowResult(request=request, final_status="pass")
+    create_ticket({
+        "ticket_id": request_id, "created_at": now, "updated_at": now,
+        "status": "pass", "workflow_result": result.model_dump(mode="json")
+    })
 
 
 def _rfq_payload():
@@ -21,6 +38,7 @@ def _rfq_payload():
 
 def test_rfq_structured_quote_verification_and_comparison(admin_headers):
     client = TestClient(app, headers=admin_headers)
+    _seed_validated_ticket()
     created = client.post("/api/vendor-sourcing/rfqs", json=_rfq_payload())
     assert created.status_code == 201, created.text
     rfq = created.json()
@@ -78,6 +96,7 @@ def test_rfq_structured_quote_verification_and_comparison(admin_headers):
 
 def test_rfq_rejects_unapproved_vendor_and_naive_deadline(admin_headers):
     client = TestClient(app, headers=admin_headers)
+    _seed_validated_ticket()
     payload = _rfq_payload()
     payload["candidate_ids"] = ["VEN-003"]
     response = client.post("/api/vendor-sourcing/rfqs", json=payload)
@@ -92,6 +111,7 @@ def test_rfq_rejects_unapproved_vendor_and_naive_deadline(admin_headers):
 
 def test_quote_compliance_and_delivery_are_gates(admin_headers):
     client = TestClient(app, headers=admin_headers)
+    _seed_validated_ticket()
     rfq_response = client.post("/api/vendor-sourcing/rfqs", json=_rfq_payload())
     assert rfq_response.status_code == 201, rfq_response.text
     rfq_id = rfq_response.json()["rfq_id"]
