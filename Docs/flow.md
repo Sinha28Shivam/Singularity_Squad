@@ -14,6 +14,7 @@ This document covers:
 - Dummy payment initiator: a **simulation-only** payment instruction for an approved, reconciled invoice, behind a backend eligibility gate (section 14).
 - Parallel orchestration: policy and vendor analyses run concurrently, plus an isolated LangGraph evaluation and benchmark (section 15).
 - Vendor sourcing (advisory only): candidate onboarding, the RFQ lifecycle, quotes, verification and comparison (section 16).
+- React UI (`frontend/`): a white-first, minimal interface on the same APIs; Streamlit is kept during the transition (section 17).
 
 All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or real payment. Saving a draft PO to the database does **not** approve or issue it. The payment simulator (section 14) never contacts a bank or gateway and never transfers money: every record says `mode: "SIMULATION"` and `money_transferred: false`.
 
@@ -1614,3 +1615,23 @@ flowchart TD
 - **Full suite:** 1029 passed (baseline 893 passed and 2 failed in the merged PR #2 code; both failures fixed).
 - **Vendor and UI tests:** 143.
 - **Live checks:** API 40/40 and UI 8/8. See `Docs/PHASE_2_VENDOR_DISCOVERY_RFQ.md` for the full list.
+
+---
+
+## 17. React UI (`frontend/`, spec `Docs/REACT_UI_MIGRATION_AND_DESIGN.md`)
+
+This is a white-first, minimal React UI on the same FastAPI APIs. Streamlit (`ui/`) stays available until the React UI is accepted.
+
+```mermaid
+flowchart LR
+    B[Browser] --> V[Vite dev server on port 5173, React UI]
+    V -->|fetch with Authorization Bearer token| A[FastAPI on port 8000]
+    A --> M[(MongoDB)]
+    A -->|CORS allow-list CORS_ALLOWED_ORIGINS| V
+    A -->|GET /api/health returns payments_simulation_enabled| V
+```
+
+- **Requests to the API:** `src/api/client.js` is the only place that calls `fetch`. It attaches the bearer token from `sessionStorage`, turns errors into safe messages and clears the session on a 401. Pages call the area modules (`src/api/*.js`) through `useApi`/`useAction`.
+- **Routes and roles:** `src/routes.js` builds the navigation by role and `src/App.jsx` redirects users away from pages for other roles. This is user experience only; every API call is still authorized by the backend.
+- **Server-confirmed results:** consequential actions go through `ConfirmDialog`. It sends the request, stays open with the server's message on error, and closes only after the server confirms, so the UI never shows a decision the server didn't make.
+- **Verification (2026-10-21):** 140 frontend tests, a production build, Python suite 1032 passed, and a real-browser end-to-end run of 23/23 checks (requester → admin run → approver approval → requester sees Approved, plus mobile and keyboard checks). Details are in the spec's implementation status section.
