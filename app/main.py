@@ -28,6 +28,7 @@ from app.routers import approvals as approvals_router
 from app.routers import auth as auth_router
 from app.routers import my_tickets as my_tickets_router
 from app.routers import payments as payments_router
+from app.routers import vendor_sourcing as vendor_sourcing_router
 from app.payments.config import validate_at_startup as validate_payment_settings
 from app.payments.service import PaymentServiceError
 from app.routers import policy_documents as policy_documents_router
@@ -175,6 +176,7 @@ async def _validation_error_handler(request: Request, exc: RequestValidationErro
 
 
 app.include_router(payments_router.router)
+app.include_router(vendor_sourcing_router.router)
 _ADMIN_ONLY = [Depends(require_admin)]
 
 
