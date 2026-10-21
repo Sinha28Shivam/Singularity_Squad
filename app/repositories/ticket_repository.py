@@ -1,6 +1,7 @@
 """Ticket persistence. One document per workflow ticket in the `tickets` collection."""
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -129,6 +130,44 @@ def list_tickets_for_owner(username: str, limit: int = 50, *, db: Optional[Datab
 def list_tickets(status: Optional[str] = None, limit: int = 100, *, db: Optional[Database] = None) -> list[dict]:
     limit = max(1, min(int(limit), 200))
     return _find_list({"status": status} if status else {}, limit, db)
+
+
+SEARCH_Q_MAX_LEN = 120
+
+
+def _search_query(q: Optional[str], status: Optional[str], owner_username: Optional[str],
+                  match_owner_fields: bool) -> dict:
+    query: dict[str, Any] = {}
+    if owner_username is not None:
+        query["owner_username"] = owner_username
+    if status:
+        query["status"] = status
+    term = (q or "").strip()[:SEARCH_Q_MAX_LEN]
+    if term:
+        rx = {"$regex": re.escape(term), "$options": "i"}
+        fields = ["ticket_id", "submission.title"]
+        if match_owner_fields:
+            fields += ["owner_username", "owner_name"]
+        query["$or"] = [{f: rx} for f in fields]
+    return query
+
+
+def search_tickets(*, q: Optional[str] = None, status: Optional[str] = None,
+                   owner_username: Optional[str] = None, match_owner_fields: bool = False,
+                   limit: int = 50, offset: int = 0, db: Optional[Database] = None) -> tuple[list[dict], int]:
+    """Filtered, paged ticket list (newest first) plus the total number of matches.
+    ``q`` is matched case-insensitively as a literal substring (regex-escaped)."""
+    limit = max(1, min(int(limit), 200))
+    offset = max(0, int(offset))
+    query = _search_query(q, status, owner_username, match_owner_fields)
+    try:
+        coll = _resolve_db(db).tickets
+        total = int(coll.count_documents(query))
+        cursor = (coll.find(query, _LIST_PROJECTION).sort([("updated_at", DESCENDING), ("ticket_id", DESCENDING)])
+                  .skip(offset).limit(limit))
+        return list(cursor), total
+    except PyMongoError as exc:
+        raise PersistenceError() from exc
 
 
 def count_tickets_by_status(*, db: Optional[Database] = None) -> dict[str, int]:

@@ -321,7 +321,7 @@ This is a starting point, not a requirement to create every page at once. Implem
 - [ ] Candidate, RFQ, and quote workflows respect verification and review states.
 - [ ] No supplier outreach, contract award, PO dispatch, or real payment is added by the frontend migration.
 - [ ] Payment screens clearly state simulation mode and no money transferred.
-- [ ] Existing Streamlit UI remains usable until the React replacement is validated.
+- [x] Existing Streamlit UI remained usable until the React replacement was validated (removed after validation, 2026-10-21).
 - [ ] Frontend production build and Python tests are run and their actual results recorded; do not claim success before execution.
 
 ## 11. Out of scope for the first UI release
@@ -358,7 +358,7 @@ Build a **small, white-first React application** with a stable navigation shell,
 
 ## Implementation status (2026-10-21, branch `feat/react-minimal-ui`)
 
-Phases A–D are implemented in `frontend/`. Phase E (verification) is done, except the cutover: Streamlit stays available, as §9 requires.
+Phases A–E are complete, including the cutover. The React UI in `frontend/` is now the only UI. After the API gaps were closed and Streamlit-only features were ported, the Streamlit UI (`ui/`), its 7 AppTest files and the `streamlit`/`requests` dependencies were removed (see *Completion* below).
 
 ### What was built
 
@@ -403,10 +403,44 @@ Phases A–D are implemented in `frontend/`. Phase E (verification) is done, exc
 - a requester opening an admin URL is redirected;
 - no console errors appear in any role.
 
-### Known gaps and follow-ups (reported by the build agents; backend not changed)
+### Completion: gaps closed, parity and cutover (2026-10-21)
 
-- **Search:** ticket list search runs on the loaded page only (up to 100 admin tickets), because there is no server-side search.
-- **Unpublished limits and rules:** upload size limits, the facts a rule can use, and which candidate decisions are allowed in each status aren't published by the API. The UI copies the backend values and the server still enforces them.
-- **Comparisons:** a saved comparison has no score breakdown and there is no single-comparison GET, so the page shows the latest comparison from the list.
-- **Error shape:** payments errors use `{error, message, reasons}` while other endpoints use `{detail}`. Both are handled.
-- **Cutover:** removing Streamlit is out of scope until the React UI has been reviewed and accepted (§9 Phase E, §11).
+Every follow-up from the first release is closed.
+
+**API gaps closed (additive, backward compatible; tests in `tests/test_ui_support_endpoints.py`):**
+
+| Gap | Resolution |
+|---|---|
+| Ticket search only covered the loaded page | `GET /api/my/tickets` and `GET /api/admin/tickets` accept `q`, `status`, `limit` and `offset`, and return `total` and `next_offset`. `q` is matched as a case-insensitive literal (regex-escaped) against the ticket ID and title, and for admins also the owner. Requesters still only see their own tickets. The UI search is server-side, debounced, with "Load more" and "Showing N of total". |
+| Upload limits not published | `GET /api/policy-documents/limits` returns `upload_max_mb`, `upload_batch_max_mb`, `max_files_per_batch`, `max_pdf_pages` and `allowed_content_types`. The upload screen shows them and checks files before upload; the server still enforces them. |
+| Rule facts hard-coded in the UI | `GET /api/policy-rules/facts` returns the facts (name, type, description, currency) and the operators, from the backend registry. The create-rule form uses it. |
+| Candidate transitions duplicated in the UI | Candidate responses include `allowed_decisions`, computed from the repository's transition table. There is also `GET /api/vendor-sourcing/candidates/transitions`. The decision buttons follow the server. |
+| No single comparison / score breakdown | `GET /api/vendor-sourcing/rfqs/{rfq_id}/comparisons/{comparison_id}` returns the stored comparison with per-row `score.components`, `weights` and `raw`. Each row has a "How this score was calculated" disclosure, labelled *explanatory only*. |
+| Two error shapes | Kept as is: `{detail}` for most endpoints, `{error, message, reasons}` for payments. The shared client handles both. |
+
+**Streamlit features ported before removal:**
+- **Policy search** (`POST /api/policy/search`): a Search tab in the policy library with filters, citations (file, version, page, section), score and retrieval-mode notices.
+- **Invoice re-check** (`POST /api/reconcile`): an ad-hoc check on the admin request page, labelled "Preview only — not saved".
+- **Sourcing metrics** (`GET /api/vendor-sourcing/metrics`): an activity section that loads on demand.
+
+**API coverage check:** every endpoint the Streamlit UI called is also called by the React UI. The only exceptions are `/api/health` (used by the menu) and the legacy `/api/workflow` and `/api/samples` demo endpoints, which the portal flow doesn't need.
+
+**Cutover:**
+- **Removed:** `ui/` and `tests/test_ui_{approvals,payments,policy,portal,rules,tickets,vendor_sourcing}.py`.
+- **Dependencies:** `streamlit` and `requests` were dropped from `requirements.txt`; nothing else imported them, and tests use `httpx`.
+- **Rollback:** `git revert` of the cutover commit restores Streamlit.
+
+**Evidence after cutover (actually executed):**
+
+| Check | Result |
+|---|---|
+| `npm test` | **165 passed** (21 files) |
+| `npm run build` / `npm audit --omit=dev` | succeeded / 0 vulnerabilities |
+| `python -m pytest -q` (Streamlit tests removed) | **906 passed**, 0 failed |
+| Real-browser E2E (Playwright Chromium, Vite, uvicorn and a throwaway MongoDB with the policy PDFs seeded) | **28/28**: the 23 earlier checks plus server-side search finding a ticket, the invoice preview panel, policy search returning cited results, the sourcing activity section, and no console errors |
+
+### Known limitations (accepted)
+
+- **Approver role:** quote verification stays an admin task; a separate procurement-reviewer role is not part of this migration.
+- **Metrics are per process:** sourcing and payment metrics reset when the API restarts.
+- **Deployment:** production hosting (serving `frontend/dist` and setting `CORS_ALLOWED_ORIGINS` to the deployed origin) is not covered here. Run `npm run build`, and configure the API's allowed origins for the deployed host.

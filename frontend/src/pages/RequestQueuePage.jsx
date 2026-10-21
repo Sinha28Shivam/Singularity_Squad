@@ -1,28 +1,25 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import PageHeader from "../components/PageHeader";
 import DataTable from "../components/DataTable";
 import StatusBadge, { statusLabel } from "../components/StatusBadge";
 import { EmptyState } from "../components/States";
-import { useApi } from "../lib/useApi";
+import ListFooter from "../components/TicketListFooter";
+import { useTicketList } from "../lib/useTicketList";
 import { formatDate, formatDateTime } from "../lib/format";
-import { adminNextAction, listAdminTickets, TICKET_STATUSES } from "../api/requests";
+import { adminNextAction, listAdminTickets, TICKET_QUERY_MAX, TICKET_STATUSES } from "../api/requests";
 import "../styles/pages/requests.css";
+
+const PAGE_SIZE = 100;
+const matchesAny = (t, q) => [t.ticket_id, t.title, t.owner_name, t.owner_username].filter(Boolean).join(" ").toLowerCase().includes(q);
 
 export default function RequestQueuePage() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
   const status = TICKET_STATUSES.includes(params.get("status")) ? params.get("status") : "";
   const [query, setQuery] = useState("");
-  const { data, error, loading, reload } = useApi(() => listAdminTickets({ status: status || undefined, limit: 100 }), [status]);
-  const counts = data?.counts || {};
-
-  const tickets = useMemo(() => ((data?.tickets) || []).filter((t) => t && t.ticket_id), [data]);
-  const rows = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return tickets;
-    return tickets.filter((t) => [t.ticket_id, t.title, t.owner_name, t.owner_username].filter(Boolean).join(" ").toLowerCase().includes(q));
-  }, [tickets, query]);
+  const list = useTicketList(listAdminTickets, { query, status, pageSize: PAGE_SIZE, matches: matchesAny });
+  const { rows, loading, error, reload, counts } = list;
 
   function setStatus(s) {
     const next = new URLSearchParams(params);
@@ -60,7 +57,7 @@ export default function RequestQueuePage() {
         <div className="field">
           <label htmlFor="queue-search">Search</label>
           <input id="queue-search" className="input" type="search" value={query} placeholder="ID, summary or requester"
-            onChange={(e) => setQuery(e.target.value)} />
+            maxLength={TICKET_QUERY_MAX} onChange={(e) => setQuery(e.target.value)} />
         </div>
         <button type="button" className="btn" onClick={reload} disabled={loading}>Refresh</button>
       </div>
@@ -69,9 +66,7 @@ export default function RequestQueuePage() {
         empty={filtered
           ? <EmptyState title="No requests match" description="Try a different status or search." />
           : <EmptyState title="No requests yet" description="Requests appear here once requesters submit them." />} />
-      {!loading && !error && tickets.length > 0 && (
-        <p className="small muted">Showing {rows.length} of {tickets.length} loaded requests. Search applies to the loaded list.</p>
-      )}
+      <ListFooter list={list} noun="requests" />
     </div>
   );
 }

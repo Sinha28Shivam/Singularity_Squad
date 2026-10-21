@@ -6,7 +6,7 @@ the bearer session; bodies never carry actor/role/status (extra=forbid). Errors 
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Optional, get_args
 
 from fastapi import APIRouter, Depends, Path, Query
 from pydantic import BaseModel, Field
@@ -14,8 +14,9 @@ from pydantic import BaseModel, Field
 from app.auth.deps import require_admin, require_approver_or_admin
 from app.policy_rag.storage import DOCUMENT_ID_PATTERN
 from app.policy_rules import evaluator, extraction, registry
+from app.policy_rules.facts import FACT_CURRENCIES, FACT_DESCRIPTIONS, FACT_TYPES
 from app.policy_rules.registry import RULE_ID_PATTERN, RuleRegistryError
-from app.policy_rules.schemas import PolicyRuleIn, RuleReviewIn, RuleStatus
+from app.policy_rules.schemas import Operator, PolicyRuleIn, RuleReviewIn, RuleStatus
 from app.portal_schemas import UserPublic
 
 router = APIRouter(tags=["policy-rules"])
@@ -56,6 +57,18 @@ def list_rules(status: Optional[RuleStatus] = Query(None),
     rules = registry.list_rules(status=status, rule_id=rule_id, limit=limit)
     return {"rules": [_with_text(r) for r in rules], "counts": registry.count_rules_by_status(),
             "active_policy_set_version": registry.active_version()}
+
+
+@router.get("/api/policy-rules/facts")
+def rule_facts(_: UserPublic = Depends(require_approver_or_admin)):
+    """Fact registry and condition operators a rule may use (read-only; for building the create-rule form)."""
+    out = []
+    for name, ftype in FACT_TYPES.items():
+        item = {"name": name, "type": ftype, "description": FACT_DESCRIPTIONS.get(name, "")}
+        if name in FACT_CURRENCIES:
+            item["currency"] = FACT_CURRENCIES[name]
+        out.append(item)
+    return {"facts": out, "operators": list(get_args(Operator))}
 
 
 @router.get("/api/policy-rules/{rule_id}/versions/{version}")

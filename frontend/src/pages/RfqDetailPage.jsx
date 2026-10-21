@@ -10,7 +10,7 @@ import { useApi } from "../lib/useApi";
 import { formatDate, formatDateTime, formatMoney, humanize } from "../lib/format";
 import {
   COMPLIANCE_STATUSES, MAX_PDF_PAGES, MIN_REASON, cancelRfq, closeRfq, compareQuotes, decideComparison,
-  downloadQuotePdf, getRfq, listComparisons, pdfFileProblem, reviseQuote, submitQuote, uploadPdfQuote, verifyQuote,
+  downloadQuotePdf, getComparison, getRfq, listComparisons, pdfFileProblem, reviseQuote, submitQuote, uploadPdfQuote, verifyQuote,
 } from "../api/vendorSourcing";
 import "../styles/pages/sourcing.css";
 
@@ -642,6 +642,9 @@ function ComparisonSection({ rfq, comparisons, onChanged }) {
   const latest = (comparisons.data || [])[0] || null;
   const cmp = fresh && (!latest || fresh.comparison_id !== latest.comparison_id || !latest.human_decision) ? fresh : latest;
   const rows = Array.isArray(cmp?.quotes) ? cmp.quotes : [];
+  const cmpId = cmp?.comparison_id || null;
+  const stored = useApi(() => (cmpId ? loadStoredComparison(rfq.rfq_id, cmpId) : Promise.resolve(null)), [rfq.rfq_id, cmpId]);
+  const scoreRows = Array.isArray(stored.data?.quotes) ? stored.data.quotes : rows;
   const eligible = rows.filter((r) => r.eligible && r.quote_id);
   const selected = quoteId || cmp?.recommended_quote_id || eligible[0]?.quote_id || "";
   const decision = cmp?.decision && typeof cmp.decision === "object" ? cmp.decision : null;
@@ -683,7 +686,8 @@ function ComparisonSection({ rfq, comparisons, onChanged }) {
                 <dt>Suggested (lowest eligible cost)</dt><dd className="mono">{cmp.recommended_quote_id || "None"}</dd>
                 <dt>Scoring policy</dt><dd>{cmp.scoring_policy_version != null ? `Version ${cmp.scoring_policy_version}` : cmp.scoring_error ? "Unavailable" : "—"}</dd>
               </dl>
-              <CompareTable rows={rows} currency={cmp.currency || rfq.currency || "INR"} policyVersion={cmp.scoring_policy_version} />
+              <CompareTable rows={rows} currency={cmp.currency || rfq.currency || "INR"} policyVersion={cmp.scoring_policy_version}
+                scores={Object.fromEntries(scoreRows.filter((r) => r?.quote_id).map((r) => [r.quote_id, r.score]))} />
               {cmp.human_decision && cmp.human_decision !== "pending" ? (
                 <Notice tone="info" title={cmp.human_decision === "accepted" ? "Human selection recorded" : "Comparison rejected"}>
                   {cmp.human_decision === "accepted" ? `Selected quote ${decision?.quote_id || "—"}. ` : ""}
@@ -731,7 +735,72 @@ function ComparisonSection({ rfq, comparisons, onChanged }) {
   );
 }
 
-function CompareTable({ rows, currency, policyVersion }) {
+/** GET the stored comparison by id (it keeps each row's score breakdown). Null on 404 (older API): use the list rows. */
+async function loadStoredComparison(rfqId, comparisonId) {
+  try {
+    return await getComparison(rfqId, comparisonId);
+  } catch (e) {
+    if (e?.status === 404 || e?.status === 405) return null;
+    throw e;
+  }
+}
+
+const SCORE_COMPONENTS = { cost: "Cost", delivery: "Delivery", warranty: "Warranty" };
+const RAW_LABELS = { total_cost: "Total cost", days_before_required: "Days before required date", warranty_months: "Warranty (months)" };
+
+function fmtNum(v) {
+  const n = Number(v);
+  return v === null || v === undefined || v === "" || !Number.isFinite(n) ? "—" : String(Number(n.toFixed(4)));
+}
+
+export function ScoreBreakdown({ score, currency }) {
+  const components = score?.components && typeof score.components === "object" ? score.components : {};
+  const weights = score?.weights && typeof score.weights === "object" ? score.weights : {};
+  const raw = score?.raw && typeof score.raw === "object" ? score.raw : {};
+  const keys = [...new Set([...Object.keys(components), ...Object.keys(weights)])];
+  if (!keys.length && !Object.keys(raw).length) return null;
+  return (
+    <details className="disclosure score-breakdown">
+      <summary>How this score was calculated</summary>
+      <div className="stack-sm">
+        <p className="small"><strong>Explanatory only — does not change ranking.</strong></p>
+        {keys.length > 0 && (
+          <table className="table score-table">
+            <caption className="sr-only">Score components</caption>
+            <thead><tr><th scope="col">Part</th><th scope="col" className="num">Component</th><th scope="col" className="num">Weight</th><th scope="col" className="num">Contribution</th></tr></thead>
+            <tbody>
+              {keys.map((k) => {
+                const c = Number(components[k]);
+                const w = Number(weights[k]);
+                return (
+                  <tr key={k}>
+                    <td>{SCORE_COMPONENTS[k] || humanize(k)}</td>
+                    <td className="num">{fmtNum(components[k])}</td>
+                    <td className="num">{fmtNum(weights[k])}</td>
+                    <td className="num">{Number.isFinite(c) && Number.isFinite(w) ? fmtNum(c * w) : "—"}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+        {score?.total != null && <p className="small">Total score (server): <strong>{score.total}</strong></p>}
+        {Object.keys(raw).length > 0 && (
+          <dl className="dl">
+            {Object.entries(raw).map(([k, v]) => (
+              <Fragment key={k}>
+                <dt>{RAW_LABELS[k] || humanize(k)}</dt>
+                <dd>{k === "total_cost" && v != null ? formatMoney(v, currency) : showValue(v)}</dd>
+              </Fragment>
+            ))}
+          </dl>
+        )}
+      </div>
+    </details>
+  );
+}
+
+function CompareTable({ rows, currency, policyVersion, scores = {} }) {
   const money = (v) => (v == null ? "—" : formatMoney(v, currency));
   return (
     <DataTable caption="Quote comparison" rows={rows} rowKey="quote_id"
@@ -757,8 +826,12 @@ function CompareTable({ rows, currency, policyVersion }) {
             <StatusBadge kind="vendor" status={r.eligibility || (r.eligible ? "eligible" : "ineligible")} />
             {Array.isArray(r.reasons) && r.reasons.length > 0 && <ul className="reason-list">{r.reasons.map((x, i) => <li key={i}>{String(x)}</li>)}</ul>}
           </>) },
-        { key: "score", header: "Score (explanatory)", align: "right", render: (r) => (r.score && typeof r.score === "object"
-          ? <>{r.score.total ?? "—"}{policyVersion != null && <div className="muted small">Policy v{policyVersion}</div>}</> : "—") },
+        { key: "score", header: "Score (explanatory)", align: "right", render: (r) => {
+          const score = scores[r.quote_id] && typeof scores[r.quote_id] === "object" ? scores[r.quote_id] : r.score;
+          return score && typeof score === "object"
+            ? <>{score.total ?? "—"}{policyVersion != null && <div className="muted small">Policy v{policyVersion}</div>}
+              <ScoreBreakdown score={score} currency={currency} /></> : "—";
+        } },
       ]} />
   );
 }

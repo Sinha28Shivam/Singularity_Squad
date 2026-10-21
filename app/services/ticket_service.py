@@ -56,6 +56,7 @@ from app.repositories import (
     update_ticket_result,
     upsert_draft_po,
 )
+from app.repositories.ticket_repository import search_tickets
 from app.schemas import AuditEntry, WorkflowResult
 from app.services.errors import TicketError
 
@@ -521,6 +522,28 @@ def list_user_tickets(user: UserPublic, limit: int = 50) -> list[dict]:
 def list_admin_tickets(status: Optional[str] = None, limit: int = 100) -> tuple[list[dict], dict[str, int]]:
     _require_persistence()
     return list_tickets(status, limit), count_tickets_by_status()
+
+
+def _next_offset(offset: int, page_len: int, total: int) -> Optional[int]:
+    nxt = offset + page_len
+    return nxt if page_len and nxt < total else None
+
+
+def search_user_tickets(user: UserPublic, q: Optional[str] = None, status: Optional[str] = None,
+                        limit: int = 50, offset: int = 0) -> tuple[list[dict], int, Optional[int]]:
+    """Requester's own tickets filtered by ``q``/``status``; returns (page, total, next_offset)."""
+    _require_persistence()
+    docs, total = search_tickets(q=q, status=status, owner_username=user.username,
+                                 match_owner_fields=False, limit=limit, offset=offset)
+    return docs, total, _next_offset(offset, len(docs), total)
+
+
+def search_admin_tickets(q: Optional[str] = None, status: Optional[str] = None, limit: int = 100,
+                         offset: int = 0) -> tuple[list[dict], int, Optional[int], dict[str, int]]:
+    """All tickets filtered by ``q``/``status``; returns (page, total, next_offset, global counts by status)."""
+    _require_persistence()
+    docs, total = search_tickets(q=q, status=status, match_owner_fields=True, limit=limit, offset=offset)
+    return docs, total, _next_offset(offset, len(docs), total), count_tickets_by_status()
 
 
 # ---------- views ----------

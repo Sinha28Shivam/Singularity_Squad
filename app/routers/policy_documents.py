@@ -102,6 +102,17 @@ def list_documents(document_type: Optional[DocumentType] = Query(None),
     return {"documents": [doc_repo.public_view(d) for d in docs], "counts": doc_repo.count_documents_by_status()}
 
 
+@router.get("/limits")
+def upload_limits(_: UserPublic = Depends(require_approver_or_admin)):
+    """Upload limits enforced by POST /upload, so clients can pre-validate (the server stays authoritative)."""
+    mb = 1024 * 1024
+    return {"upload_max_mb": round(ingestion.upload_max_bytes() / mb, 2),
+            "upload_batch_max_mb": round(ingestion.batch_max_bytes() / mb, 2),
+            "max_files_per_batch": ingestion.MAX_FILES_PER_BATCH,
+            "max_pdf_pages": int(ingestion.config().get("max_pdf_pages", 500)),
+            "allowed_content_types": ["application/pdf"]}
+
+
 @router.get("/{document_id}")
 def get_document(document_id: str = Path(..., pattern=DOCUMENT_ID_PATTERN),
                  _: UserPublic = Depends(require_approver_or_admin)):

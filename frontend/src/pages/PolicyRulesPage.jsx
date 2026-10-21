@@ -1,6 +1,6 @@
 import { useCallback, useState } from "react";
 import {
-  approveRule, createRule, getActivePolicySet, getRule, listDocuments, listRules, rejectRule, validateRule,
+  approveRule, createRule, getActivePolicySet, getRule, getRuleFacts, listDocuments, listRules, rejectRule, validateRule,
 } from "../api/policies";
 import ConfirmDialog from "../components/ConfirmDialog";
 import DataTable from "../components/DataTable";
@@ -273,10 +273,22 @@ const FACTS = ["request.attendees", "request.budget_limit", "request.service", "
 const OPS = ["eq", "ne", "gt", "gte", "lt", "lte", "in", "not_in", "exists", "is_missing", "contains_any", "date_before", "date_after"];
 const OP_LABEL = { eq: "equals", ne: "does not equal", gt: "greater than", gte: "at least", lt: "less than", lte: "at most",
   in: "is one of", not_in: "is not one of", exists: "is present", is_missing: "is missing", contains_any: "contains any of",
-  date_before: "is before", date_after: "is after" };
+  between: "is between", date_before: "is before", date_after: "is after", date_between: "is between dates" };
 const VALUE_TYPES = ["integer", "decimal", "money", "string", "boolean", "date", "string_list"];
 const LIST_OPS = new Set(["in", "not_in", "contains_any"]);
+const RANGE_OPS = new Set(["between", "date_between"]);
 const NO_VALUE_OPS = new Set(["exists", "is_missing"]);
+
+/** Fact registry + operators from GET /api/policy-rules/facts, or the built-in lists when unavailable. */
+export function factVocabulary(data) {
+  const facts = Array.isArray(data?.facts) ? data.facts.filter((x) => x && typeof x.name === "string") : [];
+  const ops = Array.isArray(data?.operators) ? data.operators.filter((o) => typeof o === "string") : [];
+  return {
+    fromServer: facts.length > 0,
+    facts: facts.length ? facts : FACTS.map((name) => ({ name })),
+    ops: ops.length ? ops : OPS,
+  };
+}
 
 function emptyRule() {
   return { name: "", description: "", severity: "review", mandatory: false, field: "po.total", op: "gt", value: "",
@@ -287,7 +299,7 @@ function emptyRule() {
 function parseValue(f) {
   if (NO_VALUE_OPS.has(f.op)) return undefined;
   const raw = f.value.trim();
-  if (LIST_OPS.has(f.op)) {
+  if (LIST_OPS.has(f.op) || RANGE_OPS.has(f.op)) {
     const parts = raw.split(",").map((s) => s.trim()).filter(Boolean);
     return f.value_type === "integer" ? parts.map((p) => Number.parseInt(p, 10)) : parts;
   }
@@ -301,7 +313,10 @@ function validateRuleForm(f) {
   if (f.name.trim().length < 3) e.name = "Enter a name of at least 3 characters.";
   if (!/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){1,3}$/.test(f.field.trim())) e.field = "Use a fact name like po.total.";
   if (!NO_VALUE_OPS.has(f.op) && !f.value.trim()) e.value = "Enter a value.";
-  if (f.value_type === "integer" && !NO_VALUE_OPS.has(f.op) && !LIST_OPS.has(f.op) && !/^-?\d+$/.test(f.value.trim())) e.value = "Enter a whole number.";
+  if (RANGE_OPS.has(f.op) && f.value.trim() && f.value.split(",").map((s) => s.trim()).filter(Boolean).length !== 2) {
+    e.value = "Enter exactly two values separated by a comma (from, to).";
+  }
+  if (f.value_type === "integer" && !NO_VALUE_OPS.has(f.op) && !LIST_OPS.has(f.op) && !RANGE_OPS.has(f.op) && !/^-?\d+$/.test(f.value.trim())) e.value = "Enter a whole number.";
   if (f.value_type === "boolean" && !NO_VALUE_OPS.has(f.op) && !/^(true|false)$/i.test(f.value.trim())) e.value = "Enter true or false.";
   if (f.value_type === "money" && !/^[A-Z]{3}$/.test(f.currency)) e.currency = "Use a 3-letter currency code.";
   if (!/^[A-Z][A-Z0-9_]{2,63}$/.test(f.reason_code.trim())) e.reason_code = "Use capitals, digits and underscores (e.g. PO_OVER_LIMIT).";
@@ -313,11 +328,23 @@ function validateRuleForm(f) {
 
 function CreateRuleForm({ onCreated, onCancel }) {
   const docs = useApi(() => listDocuments({ status: "ready" }), []);
+  const factsApi = useApi(() => getRuleFacts().catch(() => null), []);
+  const vocab = factVocabulary(factsApi.data);
   const [f, setF] = useState(emptyRule());
   const [errors, setErrors] = useState({});
   const [pending, setPending] = useState(false);
   const [error, setError] = useState(null);
   const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
+  const knownFact = vocab.facts.find((x) => x.name === f.field.trim());
+  function setField(e) {
+    const value = e.target.value;
+    const fact = vocab.facts.find((x) => x.name === value.trim());
+    setF((s) => ({
+      ...s, field: value,
+      ...(fact?.type && VALUE_TYPES.includes(fact.type) ? { value_type: fact.type } : {}),
+      ...(fact?.currency ? { currency: fact.currency } : {}),
+    }));
+  }
   const readyDocs = Array.isArray(docs.data?.documents) ? docs.data.documents : [];
 
   async function submit(e) {
@@ -373,18 +400,22 @@ function CreateRuleForm({ onCreated, onCancel }) {
         {fld("description", "Description", <textarea id="rule-description" className="textarea" maxLength={1000} value={f.description} onChange={set("description")} />)}
         <div className="grid-3">
           {fld("field", "Fact", (<>
-            <input id="rule-field" className="input" list="rule-facts" value={f.field} onChange={set("field")} aria-invalid={Boolean(errors.field)} />
-            <datalist id="rule-facts">{FACTS.map((x) => <option key={x} value={x} />)}</datalist></>), { required: true })}
+            <input id="rule-field" className="input" list="rule-facts" value={f.field} onChange={setField} aria-invalid={Boolean(errors.field)} />
+            <datalist id="rule-facts">{vocab.facts.map((x) => <option key={x.name} value={x.name}>{x.description || undefined}</option>)}</datalist></>),
+          { required: true, help: knownFact?.description
+            ? `${knownFact.description}${knownFact.type ? ` (${humanize(knownFact.type)})` : ""}`
+            : vocab.fromServer && f.field.trim() ? "Not a known fact — the server will reject unknown facts." : undefined })}
           {fld("op", "Condition", (
             <select id="rule-op" className="select" value={f.op} onChange={set("op")}>
-              {OPS.map((o) => <option key={o} value={o}>{OP_LABEL[o]}</option>)}
+              {vocab.ops.map((o) => <option key={o} value={o}>{OP_LABEL[o] || humanize(o)}</option>)}
             </select>), { required: true })}
           {fld("value_type", "Value type", (
             <select id="rule-value_type" className="select" value={f.value_type} onChange={set("value_type")}>
               {VALUE_TYPES.map((t) => <option key={t} value={t}>{humanize(t)}</option>)}
             </select>), { required: true })}
           {!NO_VALUE_OPS.has(f.op) && fld("value", "Value", <input id="rule-value" className="input" value={f.value} onChange={set("value")} aria-invalid={Boolean(errors.value)} />,
-            { required: true, help: LIST_OPS.has(f.op) ? "Separate values with commas." : undefined })}
+            { required: true, help: LIST_OPS.has(f.op) ? "Separate values with commas."
+              : RANGE_OPS.has(f.op) ? "Enter two values separated by a comma (from, to)." : undefined })}
           {f.value_type === "money" && fld("currency", "Currency", <input id="rule-currency" className="input" maxLength={3} value={f.currency} onChange={set("currency")} aria-invalid={Boolean(errors.currency)} />, { required: true })}
         </div>
         <label className="checkbox"><input type="checkbox" checked={f.mandatory} onChange={set("mandatory")} />

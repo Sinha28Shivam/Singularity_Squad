@@ -5,7 +5,7 @@ All data is synthetic. Draft PO only: the system makes no purchase and approves 
 
 Execution flow, function call sequence and file dependencies: see [Docs/flow.md](Docs/flow.md). Phase specs live in [Docs/](Docs/), including [Phase 2 Approval Safety](Docs/PHASE_2_APPROVAL_SAFETY.md). The vendor discovery and RFQ feature is documented in [Phase 2 Vendor Discovery & RFQ](Docs/PHASE_2_VENDOR_DISCOVERY_RFQ.md).
 
-**Three roles (one Streamlit app):**
+**Three roles (one React web app in `frontend/`):**
 - **Users** sign up, fill in an event request form (category, catering service, date, attendees, budget, location, notes) and track their own tickets: status, outcome, approval panel, and edit & resubmit when more info or changes are requested.
 - **Admins** log in with the account from `.env` and get a queue of all tickets. They run or re-run the multi-agent workflow (with a demo invoice) and see every result tab. They can reject hard-blocked tickets, but they **cannot approve**.
 - **Approvers** (server-configured via `APPROVER_ACCOUNTS`) decide approval requests on the **Approvals** page: approve, reject or request changes, with a confirmation step. Nobody can approve their own request.
@@ -27,9 +27,9 @@ Execution flow, function call sequence and file dependencies: see [Docs/flow.md]
 ```powershell
 python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --port 8000          # API (docs at /docs)
-cd frontend; npm install; npm run dev               # NEW React UI at http://localhost:5173 (see frontend/README.md)
-python -m streamlit run ui\streamlit_app.py         # Streamlit UI at http://localhost:8501 (kept during the transition)
-python -m pytest -q                                 # tests (mongomock; real-MongoDB integration + restart tests run if MongoDB is up)
+cd frontend; npm install; npm run dev               # UI at http://localhost:5173 (log in as admin, or create an account; see frontend/README.md)
+python -m pytest -q                                 # backend tests (mongomock; real-MongoDB integration + restart tests run if MongoDB is up)
+cd frontend; npm test                               # UI tests (Vitest + Testing Library)
 python scripts\benchmark_orchestration.py --reps 30  # sequential vs parallel analysis latency (offline; add --simulated-latency-ms 150 or --live-llm)
 ```
 
@@ -39,7 +39,7 @@ Optional LangGraph experiment (isolated, not used by the app): `python -m pip in
 ```powershell
 Get-NetTCPConnection -LocalPort 8000 -State Listen | Select OwningProcess   # find the PID
 Stop-Process -Id <PID>
-# or: python -m uvicorn app.main:app --port 8001  and set $env:WORKPLACEOPS_API="http://127.0.0.1:8001" before starting Streamlit
+# or: python -m uvicorn app.main:app --port 8001  and start the UI with $env:VITE_API_BASE_URL="http://127.0.0.1:8001"
 ```
 
 **Before committing:** `git check-ignore -v .env` must print the `.env` rule, and `git ls-files .env` must print nothing. Keep config and docs saved as UTF-8 without a BOM.
@@ -78,7 +78,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 ## Layout
 - `frontend/`: the React UI (Vite + React + React Router + lucide-react + plain CSS). It is a white-first, minimal design that uses only the existing FastAPI APIs; see `frontend/README.md` and `Docs/REACT_UI_MIGRATION_AND_DESIGN.md`.
 - `app/agents/`: one module per agent.
-- `app/vendor_sourcing/`: internal-first vendor search, candidate onboarding with audit events, RFQ lifecycle, quotation intake and revisions, private PDF `storage.py`, verification, deterministic comparison with an explanatory `scoring.py` score, and `metrics.py`. Routes: `app/routers/vendor_sourcing.py` and `vendor_candidates.py`. UI: `ui/pages_portal/vendor_sourcing.py`.
+- `app/vendor_sourcing/`: internal-first vendor search, candidate onboarding with audit events, RFQ lifecycle, quotation intake and revisions, private PDF `storage.py`, verification, deterministic comparison with an explanatory `scoring.py` score, and `metrics.py`. Routes: `app/routers/vendor_sourcing.py` and `vendor_candidates.py`. UI: `frontend/src/pages/VendorSourcingPage.jsx`, `RfqsPage.jsx`, `RfqDetailPage.jsx`.
 - `app/orchestrator.py`: workflow state and audit trail.
 - `app/main.py`: FastAPI app.
 - `app/routers/`: auth, user (`/api/my/*`) and admin (`/api/admin/*`) endpoints.
@@ -87,9 +87,8 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 - `app/policy_rag/`: PDF ingestion, chunking, embeddings, hybrid retrieval, rate cards and policy evaluation. Routes: `app/routers/policy_documents.py`, `app/routers/policy_search.py`.
 - `app/policy_rules/`: rule schema and restricted language, fact registry, evaluator, registry (lifecycle and active policy set), extraction and engine. Routes: `app/routers/policy_rules.py`.
 - `app/orchestrator.py`: workflow manager. Policy evaluation and vendor matching run concurrently via `analyze()` (2 workers, deep-copied inputs, fixed audit order, `AnalysisBranchError` on failure). `scripts/benchmark_orchestration.py` measures sequential against parallel runs. `experiments/langgraph_poc/` is an isolated LangGraph spike that the app never imports.
-- `app/payments/`: simulation-only payment initiator: config (fail closed), eligibility gate, deterministic local simulator, service (idempotency, state machine, audit outbox), metrics and the narrow `create_simulated_payment` tool. Routes: `app/routers/payments.py` (`/api/payments/simulation*`). Persistence: `app/repositories/payment_repository.py`. UI: `ui/pages_portal/payments.py`.
+- `app/payments/`: simulation-only payment initiator: config (fail closed), eligibility gate, deterministic local simulator, service (idempotency, state machine, audit outbox), metrics and the narrow `create_simulated_payment` tool. Routes: `app/routers/payments.py` (`/api/payments/simulation*`). Persistence: `app/repositories/payment_repository.py`. UI: `frontend/src/pages/SimulatedPaymentsPage.jsx`.
 - `app/approvals/`: Phase 2 approval policy (deterministic), versioned approval requests and decisions. `app/routers/approvals.py` holds `/api/approvals*`.
 - `app/repositories/`, `app/db/`: the MongoDB data-access layer and shared client.
-- `ui/app.py`: Streamlit entry point (login, User portal, Admin console in `ui/pages_portal/`). `ui/streamlit_app.py` is a shim that runs it.
 - `data/`: synthetic vendors, policies, invoices and deliveries.
 - `tests/`: test suite.

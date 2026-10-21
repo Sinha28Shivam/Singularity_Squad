@@ -1,28 +1,25 @@
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Plus } from "lucide-react";
 import PageHeader from "../components/PageHeader";
 import DataTable from "../components/DataTable";
 import StatusBadge, { statusLabel } from "../components/StatusBadge";
 import { EmptyState } from "../components/States";
-import { useApi } from "../lib/useApi";
+import ListFooter from "../components/TicketListFooter";
+import { useTicketList } from "../lib/useTicketList";
 import { formatDate, formatDateTime } from "../lib/format";
-import { categoryLabel, listMyTickets, TICKET_STATUSES, userNextAction } from "../api/requests";
+import { categoryLabel, listMyTickets, TICKET_QUERY_MAX, TICKET_STATUSES, userNextAction } from "../api/requests";
 import "../styles/pages/requests.css";
+
+const PAGE_SIZE = 50;
+const matchesMine = (t, q) => `${t.ticket_id} ${t.title || ""}`.toLowerCase().includes(q);
 
 export default function MyRequestsPage() {
   const navigate = useNavigate();
-  const { data, error, loading, reload } = useApi(() => listMyTickets(50), []);
   const [status, setStatus] = useState("");
   const [query, setQuery] = useState("");
-
-  const tickets = useMemo(() => ((data && data.tickets) || []).filter((t) => t && t.ticket_id), [data]);
-  const rows = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return tickets.filter((t) => (!status || t.status === status) &&
-      (!q || `${t.ticket_id} ${t.title || ""}`.toLowerCase().includes(q)));
-  }, [tickets, status, query]);
-  const present = useMemo(() => TICKET_STATUSES.filter((s) => tickets.some((t) => t.status === s)), [tickets]);
+  const list = useTicketList(listMyTickets, { query, status, pageSize: PAGE_SIZE, matches: matchesMine });
+  const { rows, loading, error, reload } = list;
 
   const columns = [
     { key: "ticket_id", header: "Request ID", render: (t) => (
@@ -41,7 +38,8 @@ export default function MyRequestsPage() {
     { key: "next", header: "Next action", render: (t) => <span className="next-action">{userNextAction(t.status)}</span> },
   ];
 
-  const hasAny = tickets.length > 0;
+  const filtered = Boolean(status || query.trim());
+  const hasAny = list.loaded.length > 0 || filtered;
   return (
     <div className="stack">
       <PageHeader title="My requests" description="Track the workplace event requests you've submitted."
@@ -51,13 +49,13 @@ export default function MyRequestsPage() {
           <div className="field">
             <label htmlFor="my-search">Search</label>
             <input id="my-search" className="input" type="search" value={query} placeholder="Request ID or summary"
-              onChange={(e) => setQuery(e.target.value)} />
+              maxLength={TICKET_QUERY_MAX} onChange={(e) => setQuery(e.target.value)} />
           </div>
           <div className="field">
             <label htmlFor="my-status">Status</label>
             <select id="my-status" className="select" value={status} onChange={(e) => setStatus(e.target.value)}>
               <option value="">All statuses</option>
-              {present.map((s) => <option key={s} value={s}>{statusLabel(s)}</option>)}
+              {TICKET_STATUSES.map((s) => <option key={s} value={s}>{statusLabel(s)}</option>)}
             </select>
           </div>
         </div>
@@ -71,11 +69,12 @@ export default function MyRequestsPage() {
         error={error}
         onRetry={reload}
         onRowClick={(t) => navigate(`/requests/${encodeURIComponent(t.ticket_id)}`)}
-        empty={hasAny
+        empty={filtered
           ? <EmptyState title="No requests match" description="Try a different search or status." />
           : <EmptyState title="No requests yet" description="When you submit a request for a workplace event, it will appear here."
             action={<Link to="/requests/new" className="btn">Create a request</Link>} />}
       />
+      <ListFooter list={list} noun="requests" />
     </div>
   );
 }

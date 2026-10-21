@@ -1,10 +1,12 @@
 """/api/my/* routes: requesters submit, view, edit and comment on their own tickets."""
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Path, Query
 
 from app.auth.deps import require_user
-from app.portal_schemas import NoteIn, TicketSubmission, UserPublic, UserTicketView
+from app.portal_schemas import NoteIn, TicketStatus, TicketSubmission, UserPublic, UserTicketView
 from app.services import ticket_service as svc
 
 TICKET_ID_PATTERN = r"^REQ-[A-Za-z0-9-]{1,64}$"
@@ -18,8 +20,12 @@ def submit(body: TicketSubmission, user: UserPublic = Depends(require_user)) -> 
 
 
 @router.get("/tickets")
-def my_tickets(limit: int = Query(50, ge=1, le=200), user: UserPublic = Depends(require_user)):
-    return {"tickets": [svc.to_list_item(d, admin=False) for d in svc.list_user_tickets(user, limit)]}
+def my_tickets(limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0, le=100_000),
+               q: Optional[str] = Query(None, max_length=120), status: Optional[TicketStatus] = Query(None),
+               user: UserPublic = Depends(require_user)):
+    docs, total, next_offset = svc.search_user_tickets(user, q, status, limit, offset)
+    return {"tickets": [svc.to_list_item(d, admin=False) for d in docs], "total": total,
+            "next_offset": next_offset}
 
 
 @router.get("/tickets/{ticket_id}", response_model=UserTicketView)

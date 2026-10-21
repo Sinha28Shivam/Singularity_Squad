@@ -20,7 +20,8 @@ from app.portal_schemas import UserPublic
 from app.vendor_sourcing import metrics, rfq_service, service
 from app.vendor_sourcing.rfq_schemas import (ComparisonDecision, QuoteRevision, QuoteSubmission,
                                              QuoteVerification, RFQCreate, RFQStateChange)
-from app.vendor_sourcing.schemas import CandidateDecisionIn, CandidateIn, CandidateView
+from app.routers.vendor_candidates import CandidateResponse, candidate_response
+from app.vendor_sourcing.schemas import CandidateDecisionIn, CandidateIn
 
 router = APIRouter(prefix="/api/vendor-sourcing", tags=["vendor sourcing"])
 
@@ -70,18 +71,19 @@ def search_vendors(q: str = Query("", max_length=120),
         raise HTTPException(503, _REGISTRY_UNAVAILABLE) from exc
 
 
-@router.post("/candidates", response_model=CandidateView, status_code=201)
+@router.post("/candidates", response_model=CandidateResponse, status_code=201)
 def create_candidate(body: CandidateIn, admin: UserPublic = Depends(require_admin),
                      x_correlation_id: Optional[str] = Header(None)):
     try:
-        return service.submit_candidate(body, admin.username, correlation_id=_corr(x_correlation_id))
+        return candidate_response(service.submit_candidate(body, admin.username,
+                                                           correlation_id=_corr(x_correlation_id)))
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except PersistenceError as exc:
         raise HTTPException(503, _REGISTRY_UNAVAILABLE) from exc
 
 
-@router.post("/candidates/{candidate_id}/decision", response_model=CandidateView)
+@router.post("/candidates/{candidate_id}/decision", response_model=CandidateResponse)
 def decide_candidate(candidate_id: str, body: CandidateDecisionIn,
                      admin: UserPublic = Depends(require_admin),
                      x_correlation_id: Optional[str] = Header(None)):
@@ -94,7 +96,7 @@ def decide_candidate(candidate_id: str, body: CandidateDecisionIn,
         raise HTTPException(503, _REGISTRY_UNAVAILABLE) from exc
     if result is None:
         raise HTTPException(404, "Vendor candidate not found.")
-    return result
+    return candidate_response(result)
 
 
 @router.get("/metrics")
@@ -267,6 +269,23 @@ def list_comparisons(rfq_id: str, limit: int = Query(50, ge=1, le=200), _: UserP
         if rfq_service.get_rfq(rfq_id) is None:
             raise rfq_service.RFQNotFoundError("RFQ not found.")
         return {"rfq_id": rfq_id, "items": rfq_service.list_comparisons(rfq_id, limit)}
+    return _rfq_call(_load)
+
+
+@router.get("/rfqs/{rfq_id}/comparisons/{comparison_id}")
+def get_comparison(rfq_id: str, comparison_id: str, _: UserPublic = Depends(require_admin)):
+    """One stored comparison, including each row's explanatory ``score`` (components, weights, raw). 404 if
+    the RFQ or comparison is missing or the comparison belongs to another RFQ."""
+    _check_id(rfq_id, "RFQ")
+    _check_id(comparison_id, "Comparison")
+
+    def _load():
+        if rfq_service.get_rfq(rfq_id) is None:
+            raise rfq_service.RFQNotFoundError("RFQ not found.")
+        comparison = rfq_service.get_comparison(rfq_id, comparison_id)
+        if comparison is None:
+            raise rfq_service.RFQNotFoundError("Comparison not found.")
+        return comparison
     return _rfq_call(_load)
 
 

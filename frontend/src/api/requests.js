@@ -8,14 +8,28 @@ import { api, ApiError } from "./client";
 const enc = (id) => encodeURIComponent(String(id));
 
 // ---------- requester ----------
-export const listMyTickets = (limit = 50) => api.get("/api/my/tickets", { limit });
+/**
+ * GET /api/my/tickets?q=&status=&limit=&offset= -> {tickets, total, next_offset}.
+ * Accepts a number (legacy: limit) or {q, status, limit, offset}. Older servers ignore q/status/offset and
+ * omit `total`; callers detect that and fall back to filtering the loaded list.
+ */
+export const listMyTickets = (opts = {}) => {
+  const { q, status, limit = 50, offset } = typeof opts === "number" ? { limit: opts } : opts;
+  return api.get("/api/my/tickets", { q: q || undefined, status: status || undefined, limit, offset: offset || undefined });
+};
+/** Max length of the server-side ticket search query (backend Query max_length). */
+export const TICKET_QUERY_MAX = 120;
+/** True when a ticket list response came from a server that supports q/status/offset paging. */
+export const supportsServerSearch = (data) => Boolean(data) && typeof data.total === "number";
 export const getMyTicket = (id) => api.get(`/api/my/tickets/${enc(id)}`);
 export const createMyTicket = (submission) => api.post("/api/my/tickets", submission);
 export const updateMyTicket = (id, submission) => api.put(`/api/my/tickets/${enc(id)}`, submission);
 export const addMyNote = (id, text) => api.post(`/api/my/tickets/${enc(id)}/notes`, { text });
 
 // ---------- admin ----------
-export const listAdminTickets = ({ status, limit = 100 } = {}) => api.get("/api/admin/tickets", { status, limit });
+/** GET /api/admin/tickets?q=&status=&limit=&offset= -> {tickets, counts (global by status), total, next_offset}. */
+export const listAdminTickets = ({ q, status, limit = 100, offset } = {}) =>
+  api.get("/api/admin/tickets", { q: q || undefined, status, limit, offset: offset || undefined });
 export const getAdminTicket = (id) => api.get(`/api/admin/tickets/${enc(id)}`);
 export const runAdminTicket = (id, { invoiceId, today } = {}) =>
   api.post(`/api/admin/tickets/${enc(id)}/run`, { invoice_id: invoiceId || null, today: today || null });
@@ -26,6 +40,8 @@ export const getAdminAudit = (id, limit = 500) => api.get(`/api/admin/tickets/${
 export const matchInvoice = (id, invoiceId) =>
   api.post(`/api/admin/tickets/${enc(id)}/invoice-match`, { invoice_id: invoiceId });
 export const reconcileApproval = (approvalId) => api.post(`/api/admin/approvals/${enc(approvalId)}/reconcile`);
+/** POST /api/reconcile {po, invoice_id} -> ReconciliationReport. Ad-hoc preview: nothing is stored on the ticket. */
+export const previewInvoiceCheck = (po, invoiceId) => api.post("/api/reconcile", { po, invoice_id: invoiceId }, { timeoutMs: 60000 });
 
 // ---------- shared ----------
 export const listInvoices = async () => {

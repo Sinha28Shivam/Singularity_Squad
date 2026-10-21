@@ -85,7 +85,7 @@ function ChecksList({ checks, title = "Checks" }) {
 function money(v, cur) { return formatMoney(v, cur || "INR"); }
 
 // ---------------------------------------------------------------- steps
-export function buildSteps(result) {
+export function buildSteps(result, { invoiceExtra } = {}) {
   const r = result || {};
   const steps = [];
 
@@ -253,6 +253,7 @@ export function buildSteps(result) {
     explanation: rec ? `Invoice ${rec.invoice_id || ""}: ${humanize(rec.status)}.${rec.recommendation ? ` ${rec.recommendation}` : ""}`
       : "No invoice was checked in this run.",
     body: rec ? <ReconciliationDetails rec={rec} /> : null,
+    extra: invoiceExtra || null,
   });
 
   const critic = r.critic;
@@ -300,13 +301,13 @@ export function unresolvedItems(result) {
 }
 
 /** Workflow result: overall outcome, unresolved items, steps, then audit + raw data in disclosures. */
-export default function WorkflowResult({ result, ticketId }) {
+export default function WorkflowResult({ result, ticketId, invoiceExtra }) {
   if (!result || typeof result !== "object" || !Object.keys(result).length) {
     return <p className="muted">No workflow result yet. Run the workflow to check this request.</p>;
   }
   const overall = OVERALL[result.final_status] || { label: humanize(result.final_status || "unknown"), tone: "neutral", text: "" };
   const items = unresolvedItems(result);
-  const steps = buildSteps(result);
+  const steps = buildSteps(result, { invoiceExtra });
   const po = result.procurement?.po;
   const audit = (result.audit_trail || []).filter((a) => a && typeof a === "object");
   return (
@@ -355,6 +356,7 @@ export default function WorkflowResult({ result, ticketId }) {
                     {s.body}
                   </details>
                 )}
+                {s.extra}
               </div>
             </li>
           ))}
