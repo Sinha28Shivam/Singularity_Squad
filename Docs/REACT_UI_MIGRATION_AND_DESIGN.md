@@ -353,3 +353,60 @@ The exact scripts and environment variables should be confirmed in the created `
 ## Final design decision
 
 Build a **small, white-first React application** with a stable navigation shell, clear page titles, simple forms, readable tables, muted status indicators, and detail views for complex information. Keep the backend and its safeguards unchanged, migrate feature-by-feature, and retain Streamlit until the React application demonstrates equivalent behavior.
+
+---
+
+## Implementation status (2026-10-21, branch `feat/react-minimal-ui`)
+
+Phases A–D are implemented in `frontend/`. Phase E (verification) is done, except the cutover: Streamlit stays available, as §9 requires.
+
+### What was built
+
+- **Foundation (Phase A):**
+  - **Tooling:** Vite 8, React 19, React Router 7, lucide-react and plain CSS. There is no UI framework, state library or animation library.
+  - **Design:** design tokens (§4 palette and 4 px spacing scale), an app shell with a narrow sidebar that collapses into a menu below 900 px, and a top bar.
+  - **API client:** one shared client with a bearer token kept in `sessionStorage`, a timeout, and safe error messages that never show HTML, tracebacks or raw bodies.
+  - **Shared components:** auth context, `useApi`, `PageHeader`, `DataTable`, `StatusBadge` (text label always shown), loading/empty/error states, an accessible `ConfirmDialog` (closes only after the server confirms) and accessible `Tabs`.
+- **Requests (Phase B):** sign in and create account; My requests; New request, grouped by meaning; request details with edit & resubmit when the backend allows it; admin overview using server counts only; all requests; admin request details. Admin details include run/re-run with optional invoice, the workflow result as plain-language steps with evidence behind disclosures, an approval panel (admins can't approve), close with reason, notes, invoice match and audit.
+- **Approvals and policy (Phase C):** pending approvals and history; approval details with approve / reject / request changes; policy library (multipart upload, reprocess, archive, extract rules); policy rules (active set, create, validate/approve/reject); approver policy review (rules and rate cards).
+  - Decisions use a stable idempotency key, the request version and the snapshot hash. The page honours `can_decide` and `stale_policy`, and admins see it read-only.
+- **Sourcing and payments (Phase D):** vendor directory (internal catalog kept separate from the candidate registry); candidates; RFQ list and create from a validated ticket; RFQ details (structured and raw-PDF quotes, revise, verify with a submitted-vs-verified diff, untrusted extracted text, compare plus human decision, close/cancel, events); Payments (Simulation).
+  - The PDF upload is checked for type and size in the browser before sending.
+  - Payments appear only when `/api/health` reports `payments_simulation_enabled`, and keep their banner and confirmation.
+
+### Backend changes (minimal and additive)
+
+- **CORS:** `CORSMiddleware` with an explicit allow-list (`CORS_ALLOWED_ORIGINS`, default the Vite dev origins). `*` is ignored and credentials are off.
+- **Payments flag:** `GET /api/health` now also returns `payments_simulation_enabled`, a non-secret boolean, so navigation can hide the page. The payments API still enforces the setting.
+- **Tests:** `tests/test_react_ui_backend_support.py`.
+
+### Evidence (actually executed)
+
+| Check | Result |
+|---|---|
+| `npm test` (Vitest + Testing Library, 18 files) | **140 passed** |
+| `npm run build` | succeeded (main bundle ≈ 287 kB, 91.5 kB gzip; pages lazy-loaded) |
+| `npm audit --omit=dev` | 0 vulnerabilities |
+| `python -m pytest -q` | **1032 passed** (1029 + 3 new backend-support tests) |
+| Real-browser E2E with Playwright Chromium against Vite, uvicorn and a throwaway MongoDB | **23/23** (details below) |
+| Wording scan of the source | no "Paid", "Awarded", "PO sent" or `console.log`; no `localStorage` token storage; no `dangerouslySetInnerHTML` |
+
+**Browser E2E coverage:**
+- white page background;
+- a requester creates a request and sees its ID, and the request appears in My requests;
+- an admin runs the workflow and sees a plain-language result, with no Approve control;
+- an approver approves through the confirmation dialog, and the result appears only after the server confirms, with the safety copy;
+- the requester then sees "Approved";
+- at mobile width (390 px) there is no page overflow and the menu opens;
+- the payments banner shows, and the vendors, RFQs, policy library and policy rules pages render;
+- keyboard focus is visible;
+- a requester opening an admin URL is redirected;
+- no console errors appear in any role.
+
+### Known gaps and follow-ups (reported by the build agents; backend not changed)
+
+- **Search:** ticket list search runs on the loaded page only (up to 100 admin tickets), because there is no server-side search.
+- **Unpublished limits and rules:** upload size limits, the facts a rule can use, and which candidate decisions are allowed in each status aren't published by the API. The UI copies the backend values and the server still enforces them.
+- **Comparisons:** a saved comparison has no score breakdown and there is no single-comparison GET, so the page shows the latest comparison from the list.
+- **Error shape:** payments errors use `{error, message, reasons}` while other endpoints use `{detail}`. Both are handled.
+- **Cutover:** removing Streamlit is out of scope until the React UI has been reviewed and accepted (§9 Phase E, §11).

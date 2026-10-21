@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -109,6 +110,18 @@ app = FastAPI(title="WorkplaceOps AI", version="0.1.0", lifespan=lifespan,
               description="Multi-agent workplace operations copilot (synthetic demo, draft-only).")
 
 
+def _cors_origins() -> list[str]:
+    """Explicit allow-list for the React UI (CORS_ALLOWED_ORIGINS, comma-separated). '*' is ignored."""
+    raw = os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173")
+    return [o.strip().rstrip("/") for o in raw.split(",") if o.strip() and o.strip() != "*"]
+
+
+app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), allow_credentials=False,
+                   allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+                   allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
+                   expose_headers=["Content-Disposition"])
+
+
 @app.exception_handler(PersistenceError)
 async def _persistence_error_handler(_: Request, exc: PersistenceError):
     logger.error("Persistence error (%s)", type(exc).__name__)
@@ -204,7 +217,13 @@ def _require_persistence() -> None:
 
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "llm_enabled": llm.llm_enabled(), "model": llm.model_name(), **db_status()}
+    try:  # non-secret feature flag so UIs can hide the page; the payments API still enforces it
+        from app.payments.config import load_settings
+        payments_enabled = bool(load_settings().available)
+    except Exception:  # noqa: BLE001
+        payments_enabled = False
+    return {"status": "ok", "llm_enabled": llm.llm_enabled(), "model": llm.model_name(),
+            "payments_simulation_enabled": payments_enabled, **db_status()}
 
 
 @app.get("/api/samples")

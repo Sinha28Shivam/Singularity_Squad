@@ -27,7 +27,8 @@ Execution flow, function call sequence and file dependencies: see [Docs/flow.md]
 ```powershell
 python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --port 8000          # API (docs at /docs)
-python -m streamlit run ui\streamlit_app.py         # UI at http://localhost:8501 (log in as admin, or Create account)
+cd frontend; npm install; npm run dev               # NEW React UI at http://localhost:5173 (see frontend/README.md)
+python -m streamlit run ui\streamlit_app.py         # Streamlit UI at http://localhost:8501 (kept during the transition)
 python -m pytest -q                                 # tests (mongomock; real-MongoDB integration + restart tests run if MongoDB is up)
 python scripts\benchmark_orchestration.py --reps 30  # sequential vs parallel analysis latency (offline; add --simulated-latency-ms 150 or --live-llm)
 ```
@@ -54,6 +55,7 @@ Stop-Process -Id <PID>
 - `POLICY_RAG_ENABLED` (default on), `POLICY_RAG_SEED` (default on), `POLICY_STORE_DIR` (default `data/policy_store`, git-ignored). Thresholds live in `data/policy_rag_config.json`. Embeddings use the OpenAI key (`text-embedding-3-small`); offline, the system falls back to local vectors.
 - `POLICY_RULES_ENABLED` (default on): evaluate the active rule set on each run. `POLICY_RULES_BOOTSTRAP` (default on): load `data/policy_rules_seed.json` at startup.
 - `PAYMENT_MODE` (only `simulation` is valid; unset or anything else keeps the simulator off), `PAYMENT_SIMULATION_ENABLED` (default `false`), `PAYMENT_ALLOWED_CURRENCIES` (default `INR`), `PAYMENT_SIMULATOR_PROFILE` (`normal` | `processing` | `transient_failure`), and optionally `PAYMENT_INITIATOR_ROLES` (default `admin`). There is no real-payment mode.
+- `CORS_ALLOWED_ORIGINS` (default `http://localhost:5173,http://127.0.0.1:5173`): comma-separated origins allowed to call the API from a browser (the React UI). `*` is ignored, and credentials mode is off because the UI uses a bearer token.
 - `VENDOR_QUOTE_STORE_DIR` (default `data/vendor_quote_store`, git-ignored): private storage for uploaded quotation PDFs. `WORKPLACEOPS_TEST_MONGODB_URI` (optional): the MongoDB URI for real-Mongo vendor tests.
 - `APPROVER_ACCOUNTS`: approver accounts as `user:password[,user2:password2]`, created at API startup. Demo auth only; approvers can't self-register, and an existing user or admin is never escalated.
 - `SESSION_TTL_HOURS` (default 8): login session lifetime. Optional: `ADMIN_NAME`, `ADMIN_EMAIL`.
@@ -74,6 +76,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 | missing_info | — | needs_clarification |
 
 ## Layout
+- `frontend/`: the React UI (Vite + React + React Router + lucide-react + plain CSS). It is a white-first, minimal design that uses only the existing FastAPI APIs; see `frontend/README.md` and `Docs/REACT_UI_MIGRATION_AND_DESIGN.md`.
 - `app/agents/`: one module per agent.
 - `app/vendor_sourcing/`: internal-first vendor search, candidate onboarding with audit events, RFQ lifecycle, quotation intake and revisions, private PDF `storage.py`, verification, deterministic comparison with an explanatory `scoring.py` score, and `metrics.py`. Routes: `app/routers/vendor_sourcing.py` and `vendor_candidates.py`. UI: `ui/pages_portal/vendor_sourcing.py`.
 - `app/orchestrator.py`: workflow state and audit trail.

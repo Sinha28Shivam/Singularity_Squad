@@ -1,0 +1,32 @@
+/* Request pages (requester + admin). White-first; reuses tokens from tokens.css. */
+.req-form { display: flex; flex-direction: column; gap: var(--space-5); max-width: 760px; }
+.req-form fieldset { display: flex; flex-direction: column; gap: var(--space-4); }
+.req-form .actions { display: flex; gap: var(--space-3); align-items: center; flex-wrap: wrap; }
+.req-section { display: flex; flex-direction: column; gap: var(--space-3); }
+.req-section > h2 { font-size: 16px; }
+.req-layout { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: var(--space-5); align-items: start; }
+@media (max-width: 960px) { .req-layout { grid-template-columns: 1fr; } }
+.req-summary { display: flex; flex-wrap: wrap; gap: var(--space-4) var(--space-6); align-items: center; }
+.req-filters { display: flex; gap: var(--space-3); flex-wrap: wrap; align-items: flex-end; }
+.req-filters .field { min-width: 200px; }
+.req-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: var(--space-3); }
+.req-stats .card { padding: var(--space-4); }
+.next-action { color: var(--color-text-muted); font-size: var(--text-sm); }
+
+.notes-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.notes-list li { border-left: 2px solid var(--color-border); padding-left: var(--space-3); }
+
+/* WorkflowResult */
+.wr-overall { border: 1px solid var(--color-border); border-radius: var(--radius); padding: var(--space-4);
+  display: flex; flex-direction: column; gap: var(--space-2); }
+.wr-overall.wr-error { border-color: var(--color-error); }
+.wr-overall.wr-warning { border-color: var(--color-warning); }
+.wr-overall.wr-success { border-color: var(--color-success); }
+.wr-step-num { width: 24px; height: 24px; border-radius: 50%; border: 1px solid var(--color-border-strong);
+  display: grid; place-items: center; font-size: var(--text-xs); color: var(--color-text-muted); }
+.wr-unresolved, .wr-evidence, .wr-citations { margin: 0; padding-left: var(--space-5); display: flex; flex-direction: column; gap: var(--space-1); }
+.wr-checks { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--space-3); }
+.wr-inner { margin-top: var(--space-2); }
+.wr-version { padding: var(--space-2) 0; border-bottom: 1px solid var(--color-border); }
+.wr-version:last-child { border-bottom: 0; }
+.wr blockquote, .wr-citations blockquote { margin: var(--space-1) 0; padding-left: var(--space-3); border-left: 2px solid var(--color-border); color: var(--color-text-muted); }
