@@ -153,6 +153,7 @@ def test_quote_compliance_and_delivery_are_gates(admin_headers):
 
 def test_pdf_upload_rejects_non_pdf_and_wrong_content_type(admin_headers):
     client = TestClient(app, headers=admin_headers)
+    _seed_validated_ticket()
     rfq_response = client.post("/api/vendor-sourcing/rfqs", json=_rfq_payload())
     assert rfq_response.status_code == 201, rfq_response.text
     rfq_id = rfq_response.json()["rfq_id"]
