@@ -28,6 +28,13 @@ class RFQCreate(BaseModel):
     def trim_text(cls, value: str) -> str:
         return " ".join(value.split())
 
+    @field_validator("response_deadline")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("response_deadline must include a timezone, for example Z or +05:30")
+        return value
+
 
 class QuoteSubmission(BaseModel):
     model_config = ConfigDict(extra="forbid")
