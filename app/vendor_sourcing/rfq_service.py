@@ -154,6 +154,8 @@ def submit_structured_quote(rfq_id: str, body, actor: str) -> dict:
         raise LookupError("RFQ not found.")
     if rfq["status"] != "open":
         raise ValueError("RFQ is not open for quotations.")
+    if rfq["response_deadline"] <= _now():
+        raise ValueError("RFQ response deadline has passed.")
     if body.vendor_id not in rfq["candidate_ids"]:
         raise ValueError("Vendor is not an invited RFQ recipient.")
     if not _vendor_is_eligible(body.vendor_id):
@@ -165,7 +167,7 @@ def submit_structured_quote(rfq_id: str, body, actor: str) -> dict:
     doc["delivery_date"] = body.delivery_date.isoformat()
     doc.update({
         "quote_id": _id("QUOTE"), "rfq_id": rfq_id, "submission_type": "structured",
-        "status": "pending_verification", "currency": rfq["currency"], "quantity": rfq["quantity"],
+        "status": "pending_verification", "currency": body.currency, "quantity": rfq["quantity"],
         "submitted_by": actor, "submitted_at": now, "verified_at": None, "verified_by": None,
         "reviewer_note": None, "pdf_filename": None, "pdf_sha256": None,
         "extracted_text": None, "pdf_bytes": None,
@@ -180,6 +182,8 @@ def submit_pdf_quote(rfq_id: str, vendor_id: str, quote_reference: str, filename
         raise LookupError("RFQ not found.")
     if rfq["status"] != "open":
         raise ValueError("RFQ is not open for quotations.")
+    if rfq["response_deadline"] <= _now():
+        raise ValueError("RFQ response deadline has passed.")
     if vendor_id not in rfq["candidate_ids"] or not _vendor_is_eligible(vendor_id):
         raise ValueError("Vendor is not an approved invited RFQ recipient.")
     if not pdf_bytes or len(pdf_bytes) > MAX_PDF_BYTES:
@@ -202,7 +206,7 @@ def submit_pdf_quote(rfq_id: str, vendor_id: str, quote_reference: str, filename
     doc = {
         "quote_id": _id("QUOTE"), "rfq_id": rfq_id, "vendor_id": vendor_id,
         "quote_reference": quote_reference[:120], "submission_type": "pdf",
-        "status": "pending_verification", "currency": rfq["currency"], "quantity": rfq["quantity"],
+        "status": "pending_verification", "currency": None, "quantity": rfq["quantity"],
         "pdf_filename": safe_filename, "pdf_sha256": hashlib.sha256(pdf_bytes).hexdigest(),
         "pdf_bytes": pdf_bytes, "extracted_text": extracted, "unit_price": None,
         "tax_amount": None, "delivery_fee": None, "other_fees": None, "delivery_date": None,
