@@ -3,7 +3,7 @@
 Multi-agent workflow: **Intake → Policy Advisor (local BM25 RAG + citations) → Vendor Matcher (re-plans on conflict) → Procurement (deterministic costing, draft PO) → Billing Guardian (3-way invoice match, duplicate check) → Critic → Human approval gate.**
 All data is synthetic. Draft PO only: the system makes no purchase and approves or pays nothing. See [the guide](Docs/WorkplaceOps_AI_Hackathon_Guide.md).
 
-Execution flow, function call sequence and file dependencies: see [Docs/flow.md](Docs/flow.md). Phase specs live in [Docs/](Docs/), including [Phase 2 Approval Safety](Docs/PHASE_2_APPROVAL_SAFETY.md).
+Execution flow, function call sequence and file dependencies: see [Docs/flow.md](Docs/flow.md). Phase specs live in [Docs/](Docs/), including [Phase 2 Approval Safety](Docs/PHASE_2_APPROVAL_SAFETY.md). The vendor discovery and RFQ feature is documented in [Phase 2 Vendor Discovery & RFQ](Docs/PHASE_2_VENDOR_DISCOVERY_RFQ.md).
 
 **Three roles (one Streamlit app):**
 - **Users** sign up, fill in an event request form (category, catering service, date, attendees, budget, location, notes) and track their own tickets: status, outcome, approval panel, and edit & resubmit when more info or changes are requested.
@@ -65,6 +65,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 
 ## Layout
 - `app/agents/`: one module per agent.
+- `app/vendor_sourcing/`: internal-first vendor search, candidate onboarding, RFQ creation, quotation intake, PDF extraction, verification, and deterministic quote comparison.
 - `app/orchestrator.py`: workflow state and audit trail.
 - `app/main.py`: FastAPI app.
 - `app/routers/`: auth, user (`/api/my/*`) and admin (`/api/admin/*`) endpoints.
