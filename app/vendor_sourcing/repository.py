@@ -78,11 +78,19 @@ def create_candidate(doc: dict, actor: str) -> dict:
     data["reviewed_at"] = None
     data["review_reason"] = None
     try:
+        existing = get_database().vendor_candidates.find_one(
+            {"normalized_name": data["normalized_name"], "status": {"$in": ["pending_review", "approved", "suspended"]}},
+            {"_id": 0, "candidate_id": 1},
+        )
+        if existing:
+            raise ValueError("A candidate with this name is already pending, approved, or suspended.")
         get_database().vendor_candidates.insert_one(data)
         append_event(data["candidate_id"], "candidate_submitted", actor,
                      {"status": "pending_review", "source": data["source"]})
         return _clean(data)
-    except DuplicateKeyError as exc:
+    except (DuplicateKeyError, ValueError) as exc:
+        if isinstance(exc, ValueError):
+            raise
         raise ValueError("Candidate ID already exists.") from exc
     except PyMongoError as exc:
         raise PersistenceError("Database unavailable: candidate could not be saved.") from exc
