@@ -96,8 +96,15 @@ def decide_candidate(candidate_id: str, decision: str, reason: str, actor: str) 
         before = coll.find_one({"candidate_id": candidate_id}, {"_id": 0})
         if before is None:
             return None
-        if before.get("status") == "suspended" and decision != "approve":
-            raise ValueError("Suspended candidates must be explicitly reinstated with approve or left suspended.")
+        current = before.get("status")
+        allowed = {
+            "pending_review": {"approve", "reject", "suspend"},
+            "approved": {"suspend"},
+            "rejected": set(),
+            "suspended": {"approve"},
+        }
+        if decision not in allowed.get(current, set()):
+            raise ValueError(f"Decision '{decision}' is not allowed for candidate status '{current}'.")
         updated = coll.find_one_and_update(
             {"candidate_id": candidate_id, "status": before.get("status")},
             {"$set": {"status": status, "updated_at": now, "reviewed_by": actor,
@@ -107,8 +114,10 @@ def decide_candidate(candidate_id: str, decision: str, reason: str, actor: str) 
         )
         if updated is None:
             raise ValueError("Candidate changed concurrently; reload and retry.")
-        append_event(candidate_id, "candidate_" + decision + "d" if decision != "suspend" else "candidate_suspended",
-                     actor, {"from_status": before.get("status"), "to_status": status, "reason": reason})
+        event_type = {"approve": "candidate_approved", "reject": "candidate_rejected",
+                      "suspend": "candidate_suspended"}[decision]
+        append_event(candidate_id, event_type, actor,
+                     {"from_status": before.get("status"), "to_status": status, "reason": reason})
         return _clean(updated)
     except ValueError:
         raise
