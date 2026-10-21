@@ -12,6 +12,7 @@ This document covers:
 - Phase 2 policy RAG: a multi-PDF policy library, cited evidence, rate cards and evidence snapshots that feed approvals (section 12).
 - Phase 3 dynamic policy engine: reviewed, versioned rules (data, not code) evaluated deterministically on every ticket run (section 13).
 - Dummy payment initiator: a **simulation-only** payment instruction for an approved, reconciled invoice, behind a backend eligibility gate (section 14).
+- Parallel orchestration: policy and vendor analyses run concurrently, plus an isolated LangGraph evaluation and benchmark (section 15).
 
 All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or real payment. Saving a draft PO to the database does **not** approve or issue it. The payment simulator (section 14) never contacts a bank or gateway and never transfers money: every record says `mode: "SIMULATION"` and `money_transferred: false`.
 
@@ -1479,3 +1480,78 @@ PAYMENT_SIMULATOR_PROFILE=normal     # normal | processing | transient_failure (
   - The full suite gave **767 passed**.
   - Confirmed on a real ticket: REQ-20261017-B3227AC9 (approved without an invoice) was matched with INV-5001, then simulated: `accepted_by_simulator`, ₹76,125.00, `money_transferred: false`.
 - **Live UI** (Streamlit AppTest against the real API): **10/10 checks** — banner, approved ticket listed, Eligible ₹76,125.00, confirmation text, button disabled until confirmed, receipt "Accepted by simulator" and `PAY-SIM-` ref, disclaimer, no "Paid" or success badge, exactly one record, approver read-only.
+
+---
+
+## 15. Parallel orchestration and LangGraph evaluation (spec `Docs/WorkplaceOps_AI_Improvement_Plan_Parallel_Orchestration_LangGraph.md`)
+
+This section brings in and hardens the `feat/parallel-analysis-evaluation` branch (Stage 1), adds a reproducible benchmark (Stage 2), and builds an isolated LangGraph proof of concept with an evidence-based go/no-go (Stage 3). Results are recorded in `Docs/PARALLEL_ORCHESTRATION_LANGGRAPH_EVALUATION.md`.
+
+### 15.1 Execution flow (`app/orchestrator.py`)
+
+```mermaid
+flowchart TD
+    A[intake.extract_request] --> B{missing mandatory fields?}
+    B -- yes --> Z[clarify, then _finish: Critic + human approval gate]
+    B -- no --> R[policy.load_rules]
+    R --> F[analyze: ThreadPoolExecutor max_workers=2]
+    F --> P[policy.evaluate on a deep copy of req]
+    F --> V[vendor_matcher.match_vendors on deep copies of req and rules]
+    P --> J[join: both finished]
+    V --> J
+    J -- a branch raised --> E[AnalysisBranchError, fail closed]
+    J -- ok --> L[audit: evaluate_policy, then match_vendors, fixed order]
+    L --> D[procurement.build_draft_po, withheld if policy blocked]
+    D --> I{invoice_id and PO?}
+    I -- yes --> BG[billing.reconcile]
+    I -- no --> C
+    BG --> C[_finish: Critic read-only, final status, human_approval_gate]
+```
+
+- **Branch inputs:** `analyze(req, today, rules, *, parallel=None, timings=None)` gives each branch its own `model_copy(deep=True)` inputs, so no branch can mutate shared state.
+- **Fixed join and error order:** both futures always finish before the join. Errors surface after the join as `AnalysisBranchError(branch, cause)`, checking policy before vendor so the reported branch is deterministic.
+- **Mode switch:** `WORKPLACEOPS_PARALLEL_ANALYSIS` (default on; `0`/`false`/`no`/`off` select sequential), read by `parallel_analysis_enabled()`. `_analyze_in_parallel` remains as an alias. The thread prefix is `workplaceops-analysis`.
+- **Sequential downstream:** draft PO, invoice reconciliation, Critic, approvals and payments stay sequential.
+- **Run metadata:** `result.extra["orchestration"] = {"engine": "orchestrator", "mode": "parallel" | "sequential", "analysis_ms": {"policy", "vendor", "total"}}`. It is not part of the approval snapshot hash.
+- **Portal:** `ticket_service.run_ticket` treats `AnalysisBranchError` like any workflow error: the ticket becomes `failed`, the API returns 500, and no approval request is created.
+
+### 15.2 Benchmark (`scripts/benchmark_orchestration.py`)
+
+`python scripts\benchmark_orchestration.py --reps 30 [--simulated-latency-ms 150] [--engines orchestrator,langgraph] [--json out.json] [--live-llm]`
+
+- **Scenarios:** the 4 sample requests plus happy_path with INV-5001, INV-5002 and INV-4987. Each engine, mode and scenario gets a warm-up run, then N timed reps.
+- **Output:** median, p95, mean, min and max, the speedup ratio, and a parity check of business outputs (vendor, PO total, final status, reconciliation, missing fields, audit sequence).
+- **Offline by default:** `--simulated-latency-ms` adds a sleep to the two branches and its results are labelled as simulated. `--live-llm` is opt-in and calls the configured API.
+
+| Setup | Sequential | Parallel | Speedup |
+|---|---:|---:|---:|
+| Offline, 30 reps | 1.11 ms | 1.66 ms | 0.67× |
+| Simulated 150 ms per branch | 302.4 ms | 152.4 ms | 1.99× |
+| Live LLM (gpt-4o-mini), 5 reps | 4510.6 ms | 4605.9 ms | 0.98× |
+
+Parity holds in every run. With the live LLM the only branch I/O is the policy LLM summary (about 1.9 s), while vendor matching takes about 0.2 ms, so parallelism has nothing to overlap yet. The speed-up appears once both branches do I/O.
+
+### 15.3 LangGraph proof of concept (`experiments/langgraph_poc/`, optional `requirements-langgraph.txt`)
+
+- **Graph:** a typed `StateGraph`: intake → clarification gate → policy ‖ vendor (same superstep) → join_and_gate → draft_po → optional invoice reconciliation → critic → `approval_pending`.
+- **Same results:** it reuses the existing agents plus `_worst` and `_finish`, so the results and audit order match `run_workflow`.
+- **Fail closed:** a failing branch makes the graph stop at the join, raises `AnalysisBranchError`, and never reaches `draft_po`.
+- **Human pause:** `interrupt()` with a `MemorySaver` checkpointer. Resuming only adds an audit note and **never approves**. Real approval stays in the backend approvals service.
+- **Isolation:** nothing under `app/` imports `experiments` or `langgraph`, and `requirements.txt` is unchanged. A test enforces both.
+- **Decision: NO-GO.** The graph costs about 18 ms more per run (graph build plus checkpointing) and adds 18 transitive packages and about 2× the code. It gives no material gain for this linear pipeline. Revisit if the workflow gains loops or branching, durable long-running resumable steps, or several independent I/O-bound agents.
+
+### 15.4 Breaking-change assessment
+
+- **No API, schema or behaviour change:** outputs are identical in both modes and the audit order is unchanged.
+- **New metadata:** `result.extra["orchestration"]` is added (on `WorkflowResult.extra`, which already existed).
+- **Runtime:** the LangGraph experiment is not loaded by the app.
+- **Dependencies:** none added to `requirements.txt`. `langgraph` is installed in the venv only for the spike.
+
+### 15.5 Verification record (2026-10-21)
+
+- **Full suite:** `python -m pytest -q` gave **839 passed** (767 before).
+  - 47 in `test_parallel_orchestration.py`, covering the §5 matrix in both modes, a barrier overlap test, mutation isolation, 10 repeated runs, no leaked threads, branch failure, and portal failure and parity.
+  - 14 in `test_langgraph_poc.py`.
+  - 3 in `test_benchmark_script.py`.
+- **Checks:** pyflakes and `git diff --check` are clean, with no BOM or mojibake.
+- **Benchmarks:** offline, simulated and live LLM runs as in 15.2, with parity true in all of them.

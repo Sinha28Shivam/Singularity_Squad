@@ -20,7 +20,10 @@ python -m pip install -r requirements.txt
 python -m uvicorn app.main:app --port 8000          # API (docs at /docs)
 python -m streamlit run ui\streamlit_app.py         # UI at http://localhost:8501 (log in as admin, or Create account)
 python -m pytest -q                                 # tests (mongomock; real-MongoDB integration + restart tests run if MongoDB is up)
+python scripts\benchmark_orchestration.py --reps 30  # sequential vs parallel analysis latency (offline; add --simulated-latency-ms 150 or --live-llm)
 ```
+
+Optional LangGraph experiment (isolated, not used by the app): `python -m pip install -r requirements-langgraph.txt`, then `python -m pytest -q tests\test_langgraph_poc.py`. See `experiments/langgraph_poc/README.md` and `Docs/PARALLEL_ORCHESTRATION_LANGGRAPH_EVALUATION.md`. The measured decision is **no-go**: keep the current orchestrator.
 
 **Port already in use (`[Errno 10048]`)?** Another server is already on that port. Either stop it or use a different port:
 ```powershell
@@ -36,7 +39,7 @@ Stop-Process -Id <PID>
 - `OPENAI_MODEL` (optional, default `gpt-4o-mini`).
 - `OPENAI_BASE_URL` (optional, for Azure/OpenAI-compatible endpoints).
 - `WORKPLACEOPS_OFFLINE=1` forces deterministic mode.
-- `WORKPLACEOPS_PARALLEL_ANALYSIS=0` disables concurrent policy/vendor analysis for debugging; default `1` runs those independent, read-only checks concurrently. Draft PO creation, invoice reconciliation, Critic review, and approval remain downstream gates.
+- `WORKPLACEOPS_PARALLEL_ANALYSIS=0` disables concurrent policy/vendor analysis for debugging; default `1` runs those independent, read-only checks concurrently. Draft PO creation, invoice reconciliation, Critic review, and approval remain downstream gates. Outputs are identical in both modes. If a branch fails, the run fails closed (`AnalysisBranchError`, ticket `failed`). Measured: about 2× faster when both branches do I/O, and no gain today with the live LLM, because only the policy branch calls it.
 - `MONGODB_URI` (default `mongodb://localhost:27017/`), `MONGODB_DATABASE` (default `workplaceops`).
 - `ADMIN_USERNAME`, `ADMIN_PASSWORD`: the admin account is created or updated at API startup. If unset there is no admin; there is no default password.
 - `POLICY_RAG_ENABLED` (default on), `POLICY_RAG_SEED` (default on), `POLICY_STORE_DIR` (default `data/policy_store`, git-ignored). Thresholds live in `data/policy_rag_config.json`. Embeddings use the OpenAI key (`text-embedding-3-small`); offline, the system falls back to local vectors.
@@ -69,6 +72,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 - `app/services/`: ticket service (submit, run, decide, notes, resubmit; persistence).
 - `app/policy_rag/`: PDF ingestion, chunking, embeddings, hybrid retrieval, rate cards and policy evaluation. Routes: `app/routers/policy_documents.py`, `app/routers/policy_search.py`.
 - `app/policy_rules/`: rule schema and restricted language, fact registry, evaluator, registry (lifecycle and active policy set), extraction and engine. Routes: `app/routers/policy_rules.py`.
+- `app/orchestrator.py`: workflow manager. Policy evaluation and vendor matching run concurrently via `analyze()` (2 workers, deep-copied inputs, fixed audit order, `AnalysisBranchError` on failure). `scripts/benchmark_orchestration.py` measures sequential against parallel runs. `experiments/langgraph_poc/` is an isolated LangGraph spike that the app never imports.
 - `app/payments/`: simulation-only payment initiator: config (fail closed), eligibility gate, deterministic local simulator, service (idempotency, state machine, audit outbox), metrics and the narrow `create_simulated_payment` tool. Routes: `app/routers/payments.py` (`/api/payments/simulation*`). Persistence: `app/repositories/payment_repository.py`. UI: `ui/pages_portal/payments.py`.
 - `app/approvals/`: Phase 2 approval policy (deterministic), versioned approval requests and decisions. `app/routers/approvals.py` holds `/api/approvals*`.
 - `app/repositories/`, `app/db/`: the MongoDB data-access layer and shared client.

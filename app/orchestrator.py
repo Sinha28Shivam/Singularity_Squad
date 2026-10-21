@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional
@@ -30,26 +31,71 @@ def _worst(checks: list[CheckResult]) -> str:
     return "pass"
 
 
-def _analyze_in_parallel(req, today: date, rules) -> tuple[PolicyReport, VendorMatchResult]:
-    """Run independent policy evaluation and vendor matching concurrently.
+THREAD_NAME_PREFIX = "workplaceops-analysis"
+_DISABLED_VALUES = {"0", "false", "no", "off"}
 
-    Results are returned in a fixed order so audit serialization remains deterministic.
-    Set WORKPLACEOPS_PARALLEL_ANALYSIS=0 to fall back to sequential execution.
+
+class AnalysisBranchError(RuntimeError):
+    """An independent analysis branch (policy or vendor) raised; the workflow must not produce a result."""
+
+    def __init__(self, branch: str, cause: BaseException) -> None:
+        super().__init__(f"{branch} analysis failed: {type(cause).__name__}: {cause}")
+        self.branch = branch
+        self.cause = cause
+
+
+def parallel_analysis_enabled() -> bool:
+    """WORKPLACEOPS_PARALLEL_ANALYSIS (default on); 0/false/no/off selects the sequential path."""
+    return os.getenv("WORKPLACEOPS_PARALLEL_ANALYSIS", "1").strip().lower() not in _DISABLED_VALUES
+
+
+def _timed(fn, *args):
+    start = time.perf_counter()
+    try:
+        return fn(*args), None, (time.perf_counter() - start) * 1000.0
+    except Exception as exc:  # noqa: BLE001 - re-raised as AnalysisBranchError after the join
+        return None, exc, (time.perf_counter() - start) * 1000.0
+
+
+def _run_policy(req, today: date):
+    return _timed(policy.evaluate, req, today)
+
+
+def _run_vendor(req, rules):
+    return _timed(vendor_matcher.match_vendors, req, rules)
+
+
+def analyze(req, today: date, rules, *, parallel: Optional[bool] = None,
+            timings: Optional[dict] = None) -> tuple[PolicyReport, VendorMatchResult]:
+    """Run the independent policy evaluation and vendor matching, concurrently unless disabled.
+
+    Each branch receives deep copies of its inputs so neither can mutate shared state. Both branches always
+    finish before this returns or raises; a branch exception surfaces as ``AnalysisBranchError`` (policy is
+    checked before vendor, so the reported branch is deterministic). Results come back in a fixed order.
+    When ``timings`` is given it is filled with ``{"policy": ms, "vendor": ms, "total": ms}``.
     """
-    parallel = os.getenv("WORKPLACEOPS_PARALLEL_ANALYSIS", "1").strip().lower() not in {
-        "0", "false", "no", "off"
-    }
-    if not parallel:
-        return policy.evaluate(req, today), vendor_matcher.match_vendors(req, rules)
+    if parallel is None:
+        parallel = parallel_analysis_enabled()
+    start = time.perf_counter()
+    if parallel:
+        # Bounded to two workers; dependent PO / invoice work stays sequential after the join.
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix=THREAD_NAME_PREFIX) as pool:
+            policy_future = pool.submit(_run_policy, req.model_copy(deep=True), today)
+            vendor_future = pool.submit(_run_vendor, req.model_copy(deep=True), rules.model_copy(deep=True))
+            pol_out, vm_out = policy_future.result(), vendor_future.result()
+    else:
+        pol_out = _run_policy(req.model_copy(deep=True), today)
+        vm_out = _run_vendor(req.model_copy(deep=True), rules.model_copy(deep=True))
+    if timings is not None:
+        timings.update(policy=round(pol_out[2], 3), vendor=round(vm_out[2], 3),
+                       total=round((time.perf_counter() - start) * 1000.0, 3))
+    for branch, (_, exc, _ms) in (("policy", pol_out), ("vendor", vm_out)):
+        if exc is not None:
+            raise AnalysisBranchError(branch, exc) from exc
+    return pol_out[0], vm_out[0]
 
-    # These analyses share only immutable request/rule inputs and perform no writes.
-    # Keep this bounded to two workers; dependent PO/invoice work remains sequential.
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="workplaceops-analysis") as pool:
-        policy_future = pool.submit(policy.evaluate, req, today)
-        vendor_future = pool.submit(vendor_matcher.match_vendors, req, rules)
-        policy_result = policy_future.result()
-        vendor_result = vendor_future.result()
-    return policy_result, vendor_result
+
+_analyze_in_parallel = analyze
 
 
 def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[str] = None,
@@ -72,7 +118,12 @@ def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[s
 
     # 3-4. Independent analyses run concurrently; PO generation waits for both results.
     rules = policy.load_rules()
-    pol, vm = _analyze_in_parallel(req, today, rules)
+    parallel = parallel_analysis_enabled()
+    timings: dict = {}
+    pol, vm = analyze(req, today, rules, parallel=parallel, timings=timings)
+    result.extra["orchestration"] = {"engine": "orchestrator",
+                                     "mode": "parallel" if parallel else "sequential",
+                                     "analysis_ms": timings}
     result.policy = pol
     audit.log("Policy Advisor", "evaluate_policy", _worst(pol.checks),
               "; ".join(f"{c.name}={c.status}" for c in pol.checks),

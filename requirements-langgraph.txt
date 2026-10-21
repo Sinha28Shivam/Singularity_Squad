@@ -1,0 +1,4 @@
+# OPTIONAL - experiment only (experiments\langgraph_poc). The main app does NOT need or import this.
+# Install on top of requirements.txt:  .\venv\Scripts\python.exe -m pip install -r requirements-langgraph.txt
+# Tested with langgraph 1.2.16 (langgraph-checkpoint 4.3.0, langchain-core 1.6.12) on Python 3.11, 2026-10-21.
+langgraph==1.2.16

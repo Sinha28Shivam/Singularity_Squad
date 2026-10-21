@@ -50,3 +50,39 @@ Compare the prototype with the current orchestrator using the same synthetic req
 Adopt LangGraph only if the prototype demonstrates a meaningful benefit from explicit graph state, conditional routing, resumability, or future human-in-the-loop pause/resume. Keep the current orchestrator if the graph merely wraps the same straight-line code without reducing complexity.
 
 Do not move approval enforcement, separation-of-duties checks, payment eligibility, idempotency, or durable audit writes into graph-only logic. These remain backend-enforced controls. Avoid adding `langgraph` or `langchain` to the main requirements until the proof of concept has been benchmarked and its dependency cost is justified.
+
+## Verified results (2026-10-21)
+
+All numbers below were **measured** in this repository (Windows, Python 3.11.9, 8 CPUs). Reproduce them with `scripts\benchmark_orchestration.py`.
+
+### Tests
+
+- `python -m pytest -q`: **839 passed** (767 before this work).
+  - `tests/test_parallel_orchestration.py`: 47 tests. They cover the full §5 matrix in both modes with output parity, barrier-proven overlap, input isolation (deep copies), stable repeated runs, no leaked threads, and branch failure raising `AnalysisBranchError`. They also check the portal path: a failing branch marks the ticket `failed`, creates no approval request, and both modes give the same ticket and approval results.
+  - `tests/test_langgraph_poc.py`: 14 tests (parity, fail-closed branches, overlap, pause/resume that never approves, isolation from the main app).
+  - `tests/test_benchmark_script.py`: 3 tests.
+- pyflakes and `git diff --check` are clean.
+
+### Latency: sequential vs parallel (`app/orchestrator.py`)
+
+| Setup | Sequential median | Parallel median | Speedup | Parity |
+|---|---:|---:|---:|---|
+| Offline (deterministic), 7 scenarios × 30 reps | 1.11 ms | 1.66 ms | 0.67× (thread overhead ≈ 0.5 ms) | true |
+| Simulated 150 ms I/O in **each** branch, 20 reps | 302.4 ms | 152.4 ms | **1.99×** | true |
+| **Live LLM** (gpt-4o-mini), 7 scenarios × 5 reps | 4510.6 ms | 4605.9 ms | **0.98×** (no gain) | true |
+
+**Why the live LLM run shows no gain:** with the live LLM, the policy branch takes about 1,900 ms (its LLM summary call) while vendor matching takes about 0.2 ms. Parallel time is bounded by the slower branch, so total time can't drop below about 1,900 ms. The rest of the roughly 4.5 s is the intake and Critic LLM calls, which are sequential by design.
+
+**Conclusion:** keep parallel mode on by default. It is cheap (≈ 0.5 ms), safe (outputs are identical) and future-proof. It halves latency once both branches do I/O, for example when vendor matching gains retrieval or LLM ranking. With today's code paths, don't claim a real-world speed-up.
+
+### LangGraph decision: **NO-GO** for now
+
+Evidence is in `experiments/langgraph_poc/README.md`.
+
+- **Latency:** the graph adds about 18 ms per run (graph build plus checkpointing). Offline the median is 19 ms versus about 1.6 ms. With 150 ms branches it is 169 ms versus 152 ms.
+- **Cost:** it adds 18 transitive packages and about 2× the code.
+- **Benefit:** it does not reduce complexity for this linear pipeline. Durable, access-controlled human approval is already handled by the MongoDB-backed approvals service, and an in-memory `interrupt()` does not replace that.
+
+The PoC stays isolated (`experiments/`, optional `requirements-langgraph.txt`) as a reference.
+
+**Revisit LangGraph if** the workflow gains real branching or loops (for example multi-round vendor negotiation), long-running resumable steps with a durable checkpointer, or several independent I/O-bound agents.
