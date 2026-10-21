@@ -85,6 +85,22 @@ def _ensure_indexes_once() -> None:
         _indexed_client_id = client_id
 
 
+def _audit_workflow_failure(ticket_id: str, exc: Exception) -> None:
+    """Durable, best-effort audit record for a failed run (names the failed analysis branch, if any)."""
+    from app.orchestrator import AnalysisBranchError
+    if isinstance(exc, AnalysisBranchError):
+        detail = (f"{exc.branch} analysis branch failed ({type(exc.cause).__name__}); run stopped before the "
+                  "draft PO. No approval request was created.")
+        action = "analysis_branch_failed"
+    else:
+        detail = f"Workflow error ({type(exc).__name__}); run stopped. No approval request was created."
+        action = "workflow_failed"
+    try:
+        _audit_event(ticket_id, "Orchestrator", action, detail, status="fail")
+    except Exception as audit_exc:  # noqa: BLE001 - the ticket is already marked failed
+        logger.warning("Could not audit workflow failure for ticket %s (%s)", ticket_id, type(audit_exc).__name__)
+
+
 def _mark_best_effort(ticket_id: str, status: str, error: str) -> None:
     try:
         mark_ticket_status(ticket_id, status, error=error)
@@ -119,6 +135,7 @@ def run_and_persist(text: str, today: Optional[date] = None,
     except Exception as exc:
         logger.error("Workflow failed for ticket %s (%s)", ticket_id, type(exc).__name__)
         _mark_best_effort(ticket_id, "failed", f"Workflow error: {type(exc).__name__}")
+        _audit_workflow_failure(ticket_id, exc)
         raise
 
     result.ticket_id = ticket_id
@@ -314,6 +331,7 @@ def run_ticket(ticket_id: str, admin: UserPublic, invoice_id: Optional[str] = No
     except Exception as exc:
         logger.error("Workflow failed for ticket %s (%s)", ticket_id, type(exc).__name__)
         _mark_best_effort(ticket_id, "failed", f"Workflow error: {type(exc).__name__}")
+        _audit_workflow_failure(ticket_id, exc)
         raise TicketError(500, "Workflow failed; the ticket was marked as failed.") from None
 
     result.ticket_id = ticket_id
