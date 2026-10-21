@@ -69,3 +69,44 @@ def test_api_endpoints(admin_headers):
     rec = c.post("/api/reconcile", json={"po": res["procurement"]["po"], "invoice_id": "INV-5002"}).json()
     assert rec["status"] == "mismatch"
     assert c.post("/api/reconcile", json={"po": res["procurement"]["po"], "invoice_id": "NOPE"}).status_code == 404
+
+
+def test_policy_and_vendor_analysis_run_concurrently(monkeypatch):
+    """A barrier proves both independent analyses are active at the same time."""
+    import threading
+
+    from app.agents import policy, vendor_matcher
+
+    monkeypatch.setenv("WORKPLACEOPS_PARALLEL_ANALYSIS", "1")
+    rendezvous = threading.Barrier(2, timeout=3)
+    original_policy = policy.evaluate
+    original_vendor_match = vendor_matcher.match_vendors
+
+    def synchronized_policy(req, today):
+        rendezvous.wait()
+        return original_policy(req, today)
+
+    def synchronized_vendor_match(req, rules):
+        rendezvous.wait()
+        return original_vendor_match(req, rules)
+
+    monkeypatch.setattr(policy, "evaluate", synchronized_policy)
+    monkeypatch.setattr(vendor_matcher, "match_vendors", synchronized_vendor_match)
+
+    result = run_workflow(S["happy_path"], TODAY)
+
+    assert result.policy is not None
+    assert result.vendors is not None
+    assert result.vendors.selected is not None
+    # The business result and audit order stay deterministic despite concurrent execution.
+    actions = [entry.action for entry in result.audit_trail]
+    assert actions.index("evaluate_policy") < actions.index("match_vendors")
+    assert result.procurement.po is not None
+
+
+def test_parallel_analysis_can_be_disabled(monkeypatch):
+    monkeypatch.setenv("WORKPLACEOPS_PARALLEL_ANALYSIS", "0")
+    result = run_workflow(S["happy_path"], TODAY)
+    assert result.policy is not None
+    assert result.vendors is not None
+    assert result.procurement.po is not None
