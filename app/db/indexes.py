@@ -89,6 +89,33 @@ def _ensure_payment_simulation_indexes(db: Database) -> None:
     events.create_index([("ticket_id", ASCENDING)], name="payment_event_ticket")
 
 
+def _ensure_vendor_sourcing_indexes(db: Database) -> None:
+    """Vendor candidate registry and append-only onboarding audit events."""
+    candidates = db.vendor_candidates
+    candidates.create_index([("candidate_id", ASCENDING)], unique=True, name="vendor_candidate_id_unique")
+    candidates.create_index([("normalized_name", ASCENDING), ("status", ASCENDING)],
+                            name="vendor_candidate_name_status")
+    events = db.vendor_candidate_events
+    events.create_index([("event_id", ASCENDING)], unique=True, name="vendor_event_id_unique")
+    events.create_index([("candidate_id", ASCENDING), ("created_at", ASCENDING)],
+                        name="vendor_event_candidate_time")
+
+
+def _ensure_vendor_rfq_indexes(db: Database) -> None:
+    """RFQs, vendor quotations and append-only sourcing events."""
+    rfqs = db.vendor_rfqs
+    rfqs.create_index([("rfq_id", ASCENDING)], unique=True, name="vendor_rfq_id_unique")
+    rfqs.create_index([("request_id", ASCENDING), ("created_at", DESCENDING)], name="vendor_rfq_request_created")
+    quotes = db.vendor_quotes
+    quotes.create_index([("quote_id", ASCENDING)], unique=True, name="vendor_quote_id_unique")
+    quotes.create_index([("rfq_id", ASCENDING), ("vendor_id", ASCENDING)], unique=True,
+                        name="vendor_quote_rfq_vendor_unique")
+    quotes.create_index([("rfq_id", ASCENDING), ("submitted_at", DESCENDING)], name="vendor_quote_rfq_submitted")
+    events = db.vendor_rfq_events
+    events.create_index([("event_id", ASCENDING)], unique=True, name="vendor_rfq_event_unique")
+    events.create_index([("rfq_id", ASCENDING), ("created_at", ASCENDING)], name="vendor_rfq_event_time")
+
+
 def ensure_indexes(db: Optional[Database] = None) -> None:
     db = db if db is not None else get_database()
     try:
@@ -112,5 +139,7 @@ def ensure_indexes(db: Optional[Database] = None) -> None:
         _ensure_policy_rag_a_indexes(db)
         _ensure_policy_rule_indexes(db)
         _ensure_payment_simulation_indexes(db)
+        _ensure_vendor_sourcing_indexes(db)
+        _ensure_vendor_rfq_indexes(db)
     except PyMongoError as exc:
         raise PersistenceError("Database unavailable: could not initialize indexes. Please try again later.") from exc
