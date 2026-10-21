@@ -102,7 +102,8 @@ def test_navigation_per_role(backend):
 
     at = logged_in(backend, "admin")
     assert "🛠️ Admin console" in texts(at)
-    assert page_titles(at) == ["Admin console", "Approvals (read-only)", "Policy library", "Payments (Simulation)"]
+    assert page_titles(at) == ["Admin console", "Approvals (read-only)", "Policy library", "Payments (Simulation)",
+                              "Vendor sourcing"]
 
     backend.calls.clear()
     at = logged_in(backend, "alice")

@@ -67,6 +67,8 @@ def test_rfq_structured_quote_verification_and_comparison(admin_headers):
     assert before_review.status_code == 200
     assert before_review.json()["recommended_quote_id"] is None
 
+    # Contract change (P0.6): legacy boolean compliance is only a *declaration*. Verified evidence is required
+    # for the gate to pass; a quote whose compliance is merely declared is review_required, not recommended.
     verified = client.post(
         f"/api/vendor-sourcing/rfqs/{rfq['rfq_id']}/quotes/{quote.json()['quote_id']}/verify",
         json={
@@ -78,12 +80,16 @@ def test_rfq_structured_quote_verification_and_comparison(admin_headers):
             "delivery_date": "2026-12-10",
             "warranty_months": 12,
             "warranty_scope": "Catering service quality and replacement guarantee",
-            "compliance": {"GST": True, "FoodSafety": True},
+            "compliance": {"GST": {"status": "verified", "evidence_ref": "GSTIN-07AAACG0000A1Z5"},
+                           "FoodSafety": {"status": "verified", "evidence_ref": "FSSAI-10019011000000",
+                                          "expires_on": "2027-06-30"}},
             "reviewer_note": "Checked quote values and compliance evidence"
         }
     )
     assert verified.status_code == 200, verified.text
     assert verified.json()["status"] == "verified"
+    assert verified.json()["submitted"]["compliance"]["GST"]["status"] == "declared"
+    assert {"compliance.GST", "compliance.FoodSafety"} <= set(verified.json()["verification"]["fields_changed"])
 
     comparison = client.post(f"/api/vendor-sourcing/rfqs/{rfq['rfq_id']}/compare")
     assert comparison.status_code == 200, comparison.text
@@ -149,6 +155,9 @@ def test_quote_compliance_and_delivery_are_gates(admin_headers):
     assert row["delivery_compliant"] is False
     assert row["warranty_compliant"] is False
     assert row["missing_compliance"] == ["FoodSafety"]
+    # Legacy True is a declaration only -> review required (contract change P0.6).
+    assert row["review_required_compliance"] == ["GST"]
+    assert row["compliance_gate"] == {"GST": "review_required", "FoodSafety": "missing"}
 
 
 def test_pdf_upload_rejects_non_pdf_and_wrong_content_type(admin_headers):

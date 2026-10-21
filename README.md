@@ -13,6 +13,15 @@ Execution flow, function call sequence and file dependencies: see [Docs/flow.md]
 - **Dynamic policy engine (Phase 3):** business rules are reviewed, versioned data rather than code. Admins extract candidate rules from ready PDFs (LLM with deterministic fallback, cited evidence, prompt-injection flags). Approvers validate and approve or reject them; nothing activates automatically. Every ticket run evaluates the active policy-set version deterministically, and approvals are bound to that version, so a policy change makes them stale.
 - Every draft PO needs an approver's sign-off. Approval records an internal authorization only: the PO stays a draft, and no order or payment is executed.
 - **Payments (Simulation) — no money is ever transferred:** for an approved ticket with a matched invoice, an admin can create one **simulated** payment instruction on the "Payments (Simulation)" page. The backend re-checks eligibility on every request: approval current and bound to the active policy set, invoice matched, no duplicate or policy block, canonical Decimal amount, allow-listed currency. It is idempotent (same key → same payment; changed payload → 409) and fully audited. A local deterministic simulator returns an "Accepted by simulator" receipt with a fake `PAY-SIM-…` reference. There is no bank or gateway SDK and no network call, and every response says `mode: "SIMULATION"`, `money_transferred: false`. Disabled unless `PAYMENT_MODE=simulation` and `PAYMENT_SIMULATION_ENABLED=true`. Approvers can view payments read-only; users can't see them.
+- **Vendor sourcing — advisory only (admin, "🏪 Vendor sourcing"):** this feature runs entirely inside the system; no supplier is contacted and nothing is awarded, dispatched or paid. Admins:
+  - search the internal catalog first, then the candidate registry (external discovery is off);
+  - onboard candidates (they start `pending_review`; approve, reject or suspend with a reason; duplicates give 409);
+  - create RFQs bound to a validated ticket, then close or cancel them;
+  - take structured or PDF quotes, with PDFs stored privately outside MongoDB and their text treated as untrusted;
+  - verify terms, keeping the submitted and verified values separately;
+  - compare verified quotes with rule-based Decimal gates (budget, delivery, warranty, compliance **evidence**) and record a human decision.
+
+  See `Docs/PHASE_2_VENDOR_DISCOVERY_RFQ.md`.
 
 ## Run
 ```powershell
@@ -45,6 +54,7 @@ Stop-Process -Id <PID>
 - `POLICY_RAG_ENABLED` (default on), `POLICY_RAG_SEED` (default on), `POLICY_STORE_DIR` (default `data/policy_store`, git-ignored). Thresholds live in `data/policy_rag_config.json`. Embeddings use the OpenAI key (`text-embedding-3-small`); offline, the system falls back to local vectors.
 - `POLICY_RULES_ENABLED` (default on): evaluate the active rule set on each run. `POLICY_RULES_BOOTSTRAP` (default on): load `data/policy_rules_seed.json` at startup.
 - `PAYMENT_MODE` (only `simulation` is valid; unset or anything else keeps the simulator off), `PAYMENT_SIMULATION_ENABLED` (default `false`), `PAYMENT_ALLOWED_CURRENCIES` (default `INR`), `PAYMENT_SIMULATOR_PROFILE` (`normal` | `processing` | `transient_failure`), and optionally `PAYMENT_INITIATOR_ROLES` (default `admin`). There is no real-payment mode.
+- `VENDOR_QUOTE_STORE_DIR` (default `data/vendor_quote_store`, git-ignored): private storage for uploaded quotation PDFs. `WORKPLACEOPS_TEST_MONGODB_URI` (optional): the MongoDB URI for real-Mongo vendor tests.
 - `APPROVER_ACCOUNTS`: approver accounts as `user:password[,user2:password2]`, created at API startup. Demo auth only; approvers can't self-register, and an existing user or admin is never escalated.
 - `SESSION_TTL_HOURS` (default 8): login session lifetime. Optional: `ADMIN_NAME`, `ADMIN_EMAIL`.
 - `WORKPLACEOPS_PERSISTENCE`: `required` (default; DB write failures return 503) or `disabled` (no database).
@@ -65,7 +75,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 
 ## Layout
 - `app/agents/`: one module per agent.
-- `app/vendor_sourcing/`: internal-first vendor search, candidate onboarding, RFQ creation, quotation intake, PDF extraction, verification, and deterministic quote comparison.
+- `app/vendor_sourcing/`: internal-first vendor search, candidate onboarding with audit events, RFQ lifecycle, quotation intake and revisions, private PDF `storage.py`, verification, deterministic comparison with an explanatory `scoring.py` score, and `metrics.py`. Routes: `app/routers/vendor_sourcing.py` and `vendor_candidates.py`. UI: `ui/pages_portal/vendor_sourcing.py`.
 - `app/orchestrator.py`: workflow state and audit trail.
 - `app/main.py`: FastAPI app.
 - `app/routers/`: auth, user (`/api/my/*`) and admin (`/api/admin/*`) endpoints.

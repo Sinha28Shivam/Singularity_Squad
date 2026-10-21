@@ -291,6 +291,138 @@ def payment_error(exc: Exception) -> dict:
             "status_code": getattr(exc, "status_code", None)}
 
 
+# --------------------------------------------------------------------------- vendor sourcing (ADVISORY ONLY)
+# Mirrors app/routers/vendor_sourcing.py. Nothing here contacts a supplier, awards work or dispatches a PO.
+VS_BASE = "/api/vendor-sourcing"
+VENDOR_ADVISORY = "Advisory sourcing only — no supplier is contacted, nothing is awarded, no PO is dispatched."
+CANDIDATE_STATUSES = ["pending_review", "approved", "rejected", "suspended"]
+RFQ_STATUSES = ["open", "closed", "cancelled"]
+COMPLIANCE_STATUSES = ["verified", "declared", "missing"]
+
+
+def _q(value: str) -> str:
+    return quote(str(value), safe="")
+
+
+def _rfq_path(rfq_id: str) -> str:
+    return f"{VS_BASE}/rfqs/{_q(rfq_id)}"
+
+
+def _clean_params(params: dict) -> Optional[dict]:
+    out = {k: v for k, v in params.items() if v not in (None, "")}
+    return out or None
+
+
+def _rows(data: Any, *keys: str) -> list:
+    if isinstance(data, dict):
+        for key in keys:
+            if isinstance(data.get(key), list):
+                data = data[key]
+                break
+    return [r for r in data or [] if isinstance(r, dict)] if isinstance(data, list) else []
+
+
+def vs_search(query: str = "", service: Optional[str] = None, status: Optional[str] = None,
+              limit: int = 100) -> dict:
+    data = api_get(f"{VS_BASE}/vendors", params=_clean_params(
+        {"q": query, "service": service, "status": status, "limit": limit}))
+    return data if isinstance(data, dict) else {}
+
+
+def vs_create_candidate(body: dict) -> Any:
+    return api_post(f"{VS_BASE}/candidates", body, timeout=30)
+
+
+def vs_decide_candidate(candidate_id: str, decision: str, reason: str) -> Any:
+    return api_post(f"{VS_BASE}/candidates/{_q(candidate_id)}/decision",
+                    {"decision": decision, "reason": reason}, timeout=30)
+
+
+def vs_get_candidate(candidate_id: str) -> Any:
+    data = api_get(f"{VS_BASE}/candidates/{_q(candidate_id)}")
+    return data.get("candidate") if isinstance(data, dict) and isinstance(data.get("candidate"), dict) else data
+
+
+def vs_candidate_events(candidate_id: str) -> list:
+    return _rows(api_get(f"{VS_BASE}/candidates/{_q(candidate_id)}/events"), "events", "items")
+
+
+def vs_list_rfqs(status: Optional[str] = None, request_id: Optional[str] = None,
+                 limit: int = 50, offset: int = 0) -> list:
+    data = api_get(f"{VS_BASE}/rfqs", params=_clean_params(
+        {"status": status, "request_id": request_id, "limit": limit, "offset": offset}))
+    return _rows(data, "rfqs", "items")
+
+
+def vs_create_rfq(body: dict) -> Any:
+    return api_post(f"{VS_BASE}/rfqs", body, timeout=30)
+
+
+def vs_get_rfq(rfq_id: str) -> dict:
+    data = api_get(_rfq_path(rfq_id))
+    if not isinstance(data, dict):
+        return {}
+    if not isinstance(data.get("rfq"), dict):  # tolerate a bare RFQ document
+        data = {"rfq": data, "quotes": data.get("quotes") or []}
+    return data
+
+
+def vs_close_rfq(rfq_id: str, reason: str) -> Any:
+    return api_post(f"{_rfq_path(rfq_id)}/close", {"reason": reason}, timeout=30)
+
+
+def vs_cancel_rfq(rfq_id: str, reason: str) -> Any:
+    return api_post(f"{_rfq_path(rfq_id)}/cancel", {"reason": reason}, timeout=30)
+
+
+def vs_submit_quote(rfq_id: str, body: dict) -> Any:
+    return api_post(f"{_rfq_path(rfq_id)}/quotes", body, timeout=30)
+
+
+def vs_revise_quote(rfq_id: str, quote_id: str, body: dict) -> Any:
+    return api_post(f"{_rfq_path(rfq_id)}/quotes/{_q(quote_id)}/revise", body, timeout=30)
+
+
+def vs_upload_pdf_quote(rfq_id: str, vendor_id: str, quote_reference: str, filename: str, data: bytes) -> Any:
+    """Raw ``application/pdf`` body (not multipart); metadata travels as query parameters."""
+    headers = _headers()
+    resp = requests.post(f"{API_BASE}{_rfq_path(rfq_id)}/quotes/pdf", data=bytes(data),
+                         params={"vendor_id": vendor_id, "quote_reference": quote_reference, "filename": filename},
+                         headers={"Content-Type": "application/pdf", **headers}, timeout=UPLOAD_TIMEOUT)
+    return _handle(resp, bool(headers))
+
+
+def vs_download_quote_pdf(rfq_id: str, quote_id: str) -> bytes:
+    headers = _headers()
+    resp = requests.get(f"{API_BASE}{_rfq_path(rfq_id)}/quotes/{_q(quote_id)}/pdf", headers=headers,
+                        timeout=GET_TIMEOUT)
+    if int(getattr(resp, "status_code", 200) or 200) >= 400:
+        _handle(resp, bool(headers))  # raises ApiError (or reruns on 401)
+    content = getattr(resp, "content", b"")
+    return content if isinstance(content, (bytes, bytearray)) else b""
+
+
+def vs_verify_quote(rfq_id: str, quote_id: str, body: dict) -> Any:
+    return api_post(f"{_rfq_path(rfq_id)}/quotes/{_q(quote_id)}/verify", body, timeout=30)
+
+
+def vs_compare(rfq_id: str) -> Any:
+    return api_post(f"{_rfq_path(rfq_id)}/compare", None, timeout=60)
+
+
+def vs_comparison_decision(rfq_id: str, comparison_id: str, decision: str, quote_id: Optional[str],
+                           reason: str) -> Any:
+    body: dict = {"decision": decision, "reason": reason}
+    if quote_id:
+        body["quote_id"] = quote_id
+    return api_post(f"{_rfq_path(rfq_id)}/comparisons/{_q(comparison_id)}/decision", body, timeout=30)
+
+
+def vs_metrics() -> dict:
+    data = api_get(f"{VS_BASE}/metrics")
+    return data if isinstance(data, dict) else {}
+
+
 @st.cache_data(ttl=15, show_spinner=False)
 def fetch_health() -> Optional[dict]:
     try:

@@ -16,7 +16,9 @@ if str(_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from ui.lib.api import API_BASE, api_post, clear_session, current_user, fetch_health, fetch_invoices  # noqa: E402
-from ui.pages_portal import admin_console, approvals, login, payments, policy_library, user_portal  # noqa: E402
+from ui.pages_portal import (  # noqa: E402
+    admin_console, approvals, login, payments, policy_library, user_portal, vendor_sourcing,
+)
 
 DISCLAIMER = (
     "**Prototype on synthetic data · Draft-only.** Purchase orders stay drafts, nothing is purchased "
@@ -80,6 +82,7 @@ def main() -> None:
             st.Page(approvals.render, title="Approvals (read-only)", icon="🛡️", url_path="approvals"),
             st.Page(policy_library.render, title="Policy library", icon="📚", url_path="policy-library"),
             st.Page(payments.render, title="Payments (Simulation)", icon="💸", url_path="payments"),
+            st.Page(vendor_sourcing.render, title="Vendor sourcing", icon="🏪", url_path="vendor-sourcing"),
         ]
     elif user.get("role") == "approver":
         pages = [

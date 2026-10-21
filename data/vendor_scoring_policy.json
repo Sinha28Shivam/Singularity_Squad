@@ -1,0 +1,9 @@
+{
+  "version": "vsp-1",
+  "description": "Explanatory composite score shown beside the gate + lowest-cost ranking. It never changes eligibility or rank.",
+  "weights": {
+    "cost": 0.6,
+    "delivery": 0.2,
+    "warranty": 0.2
+  }
+}

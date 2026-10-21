@@ -1,13 +1,60 @@
 """Contracts for vendor discovery and onboarding. Submission never implies approval."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 CandidateStatus = Literal["pending_review", "approved", "rejected", "suspended"]
 CandidateSource = Literal["manual", "external_discovery"]
+ACTIVE_STATUSES = ("pending_review", "approved", "suspended")
+
+MAX_PAGE_LIMIT = 200
+MAX_PAGE_OFFSET = 10_000
+
+
+class ComplianceEvidenceIn(BaseModel):
+    """Evidence *metadata* only (no file). A submitted reference is never treated as verified proof."""
+    model_config = ConfigDict(extra="forbid")
+
+    document_type: str = Field(min_length=2, max_length=120)
+    reference: str = Field(min_length=1, max_length=500)
+    expires_on: Optional[date] = None
+    verified: bool = False
+
+    @field_validator("document_type", "reference")
+    @classmethod
+    def collapse_ws(cls, value: str) -> str:
+        value = " ".join(value.split())
+        if not value:
+            raise ValueError("must not be blank")
+        return value
+
+    @field_validator("verified")
+    @classmethod
+    def never_verified_on_submit(cls, value: bool) -> bool:
+        if value:
+            raise ValueError("evidence cannot be submitted as verified; verification is a separate reviewer action")
+        return False
+
+
+class ComplianceEvidenceView(BaseModel):
+    document_type: str
+    reference: str
+    expires_on: Optional[date] = None
+    verified: bool = False
+    verified_by: Optional[str] = None
+    verified_at: Optional[datetime] = None
+
+
+class StatusHistoryEntry(BaseModel):
+    from_status: Optional[str] = None
+    to_status: str
+    actor: str
+    reason: Optional[str] = None
+    at: datetime
+    correlation_id: Optional[str] = None
 
 
 class CandidateIn(BaseModel):
@@ -21,6 +68,7 @@ class CandidateIn(BaseModel):
     source_reference: Optional[str] = Field(default=None, max_length=500)
     notes: str = Field(default="", max_length=2000)
     compliance_documents: list[str] = Field(default_factory=list, max_length=30)
+    compliance_evidence: list[ComplianceEvidenceIn] = Field(default_factory=list, max_length=30)
 
     @field_validator("name")
     @classmethod
@@ -60,6 +108,11 @@ class CandidateView(BaseModel):
     reviewed_by: Optional[str] = None
     reviewed_at: Optional[datetime] = None
     review_reason: Optional[str] = None
+    compliance_evidence: list[ComplianceEvidenceView] = Field(default_factory=list)
+    status_history: list[StatusHistoryEntry] = Field(default_factory=list)
+    # True when the state change is committed but its audit event is not yet in vendor_candidate_events
+    # (it stays queued on the candidate document and is delivered by repair_pending_events()).
+    audit_pending: bool = False
 
 
 class VendorSearchResult(BaseModel):

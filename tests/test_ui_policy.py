@@ -249,7 +249,7 @@ def all_text(at: AppTest) -> str:
 # --------------------------------------------------------------------------- navigation
 def test_navigation_per_role(backend):
     assert page_titles(logged_in(backend, "admin")) == ["Admin console", "Approvals (read-only)", "Policy library",
-                                                         "Payments (Simulation)"]
+                                                         "Payments (Simulation)", "Vendor sourcing"]
     assert page_titles(logged_in(backend, "carol")) == ["Approvals", "Policy library",
                                                          "Payments (Simulation, read-only)"]
     assert page_titles(logged_in(backend, "alice")) == ["My requests"]

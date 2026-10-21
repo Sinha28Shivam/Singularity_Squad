@@ -5,7 +5,7 @@ from typing import Optional
 
 from pymongo import ASCENDING, DESCENDING
 from pymongo.database import Database
-from pymongo.errors import PyMongoError
+from pymongo.errors import DuplicateKeyError, PyMongoError
 
 from app.db.errors import PersistenceError
 from app.db.mongo import get_database
@@ -89,12 +89,33 @@ def _ensure_payment_simulation_indexes(db: Database) -> None:
     events.create_index([("ticket_id", ASCENDING)], name="payment_event_ticket")
 
 
+def _backfill_candidate_active_flag(candidates) -> None:
+    """Set `active` on candidates written before the flag existed. A legacy duplicate active name is left
+    unflagged (still blocked by the repository's status check) instead of failing startup."""
+    active = ["pending_review", "approved", "suspended"]
+    candidates.update_many({"active": {"$exists": False}, "status": {"$nin": active}}, {"$set": {"active": False}})
+    for doc in candidates.find({"active": {"$exists": False}, "status": {"$in": active}},
+                               {"_id": 1}).limit(10_000):
+        try:
+            candidates.update_one({"_id": doc["_id"]}, {"$set": {"active": True}})
+        except DuplicateKeyError:
+            continue
+
+
 def _ensure_vendor_sourcing_indexes(db: Database) -> None:
     """Vendor candidate registry and append-only onboarding audit events."""
     candidates = db.vendor_candidates
     candidates.create_index([("candidate_id", ASCENDING)], unique=True, name="vendor_candidate_id_unique")
     candidates.create_index([("normalized_name", ASCENDING), ("status", ASCENDING)],
                             name="vendor_candidate_name_status")
+    # At most one *active* (pending_review/approved/suspended) candidate per normalized name; `active` is
+    # maintained by app.vendor_sourcing.repository on every write.
+    candidates.create_index([("normalized_name", ASCENDING)], unique=True,
+                            partialFilterExpression={"active": True},
+                            name="vendor_candidate_active_name_unique")
+    candidates.create_index([("updated_at", DESCENDING), ("candidate_id", ASCENDING)],
+                            name="vendor_candidate_updated")
+    _backfill_candidate_active_flag(candidates)
     events = db.vendor_candidate_events
     events.create_index([("event_id", ASCENDING)], unique=True, name="vendor_event_id_unique")
     events.create_index([("candidate_id", ASCENDING), ("created_at", ASCENDING)],
@@ -106,11 +127,26 @@ def _ensure_vendor_rfq_indexes(db: Database) -> None:
     rfqs = db.vendor_rfqs
     rfqs.create_index([("rfq_id", ASCENDING)], unique=True, name="vendor_rfq_id_unique")
     rfqs.create_index([("request_id", ASCENDING), ("created_at", DESCENDING)], name="vendor_rfq_request_created")
+    rfqs.create_index([("status", ASCENDING), ("created_at", DESCENDING)], name="vendor_rfq_status_created")
     quotes = db.vendor_quotes
     quotes.create_index([("quote_id", ASCENDING)], unique=True, name="vendor_quote_id_unique")
+    # Revisions: the old one-quote-per-vendor unique index is replaced by unique (rfq, vendor, revision) plus
+    # "only one active quote per (rfq, vendor)" via a partial unique index on the maintained `active` flag.
+    if "vendor_quote_rfq_vendor_unique" in quotes.index_information():
+        quotes.drop_index("vendor_quote_rfq_vendor_unique")
+    quotes.create_index([("rfq_id", ASCENDING), ("vendor_id", ASCENDING), ("revision", ASCENDING)], unique=True,
+                        name="vendor_quote_rfq_vendor_revision_unique")
     quotes.create_index([("rfq_id", ASCENDING), ("vendor_id", ASCENDING)], unique=True,
-                        name="vendor_quote_rfq_vendor_unique")
+                        partialFilterExpression={"active": True}, name="vendor_quote_rfq_vendor_active_unique")
     quotes.create_index([("rfq_id", ASCENDING), ("submitted_at", DESCENDING)], name="vendor_quote_rfq_submitted")
+    quotes.create_index([("pending_events.event_id", ASCENDING)], name="vendor_quote_pending_events", sparse=True)
+    rfqs.create_index([("pending_events.event_id", ASCENDING)], name="vendor_rfq_pending_events", sparse=True)
+    comparisons = db.vendor_rfq_comparisons
+    comparisons.create_index([("comparison_id", ASCENDING)], unique=True, name="vendor_rfq_comparison_id_unique")
+    comparisons.create_index([("rfq_id", ASCENDING), ("created_at", DESCENDING)], name="vendor_rfq_comparison_time")
+    comparisons.create_index([("rfq_id", ASCENDING)], unique=True,
+                             partialFilterExpression={"human_decision": "accepted"},
+                             name="vendor_rfq_comparison_one_accepted")
     events = db.vendor_rfq_events
     events.create_index([("event_id", ASCENDING)], unique=True, name="vendor_rfq_event_unique")
     events.create_index([("rfq_id", ASCENDING), ("created_at", ASCENDING)], name="vendor_rfq_event_time")

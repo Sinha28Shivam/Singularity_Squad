@@ -13,6 +13,7 @@ This document covers:
 - Phase 3 dynamic policy engine: reviewed, versioned rules (data, not code) evaluated deterministically on every ticket run (section 13).
 - Dummy payment initiator: a **simulation-only** payment instruction for an approved, reconciled invoice, behind a backend eligibility gate (section 14).
 - Parallel orchestration: policy and vendor analyses run concurrently, plus an isolated LangGraph evaluation and benchmark (section 15).
+- Vendor sourcing (advisory only): candidate onboarding, the RFQ lifecycle, quotes, verification and comparison (section 16).
 
 All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or real payment. Saving a draft PO to the database does **not** approve or issue it. The payment simulator (section 14) never contacts a bank or gateway and never transfers money: every record says `mode: "SIMULATION"` and `money_transferred: false`.
 
@@ -1562,3 +1563,54 @@ Parity holds in every run. With the live LLM the only branch I/O is the policy L
   - 3 in `test_benchmark_script.py`.
 - **Checks:** pyflakes and `git diff --check` are clean, with no BOM or mojibake.
 - **Benchmarks:** offline, simulated and live LLM runs as in 15.2, with parity true in all of them.
+
+---
+
+## 16. Vendor sourcing: discovery, onboarding, RFQ, quotes and comparison (advisory only)
+
+Specs: `Docs/WorkplaceOps_Master_Review_and_Vendor_Discovery_RFQ_Plan.md` and `Docs/PHASE_2_VENDOR_DISCOVERY_RFQ.md` (which includes the implementation status and evidence). Every route is under `/api/vendor-sourcing` and is **admin-only**. Nothing contacts a supplier, awards work, dispatches a PO or pays.
+
+### 16.1 Files
+
+| File | Role |
+|---|---|
+| `app/vendor_sourcing/service.py`, `repository.py`, `schemas.py` | Internal catalog search (read-only) before the candidate registry. Candidate lifecycle `pending_review → approved/rejected/suspended`, using compare-and-set writes, an `active` flag with a unique partial name index, `compliance_evidence`, `status_history`, and the outbox audit to `vendor_candidate_events`. |
+| `app/vendor_sourcing/rfq_service.py`, `rfq_schemas.py` | RFQs bound to a validated ticket snapshot. States `open → closed/cancelled`. Structured, PDF and revised quotes, verification (`submitted` vs `verified` plus a diff), the comparison gates, saved comparisons, the human decision, and the outbox audit to `vendor_rfq_events`. |
+| `app/vendor_sourcing/storage.py` | Private PDF store (`VENDOR_QUOTE_STORE_DIR`). Server-generated keys, atomic writes, no traversal, retention purge. |
+| `app/vendor_sourcing/scoring.py`, `data/vendor_scoring_policy.json` | Versioned weights (`vsp-1`, which must sum to 1.0). The score is explanatory only. |
+| `app/vendor_sourcing/metrics.py` | In-process counters (`GET /metrics`). |
+| `app/routers/vendor_sourcing.py`, `app/routers/vendor_candidates.py` | Routes with a uniform `{"detail": …}` error shape and an optional `X-Correlation-ID` header. |
+| `ui/pages_portal/vendor_sourcing.py` | The admin **🏪 Vendor sourcing** page (Search, Candidates, RFQs, Quotes, Compare, Audit). |
+
+### 16.2 Flow
+
+```mermaid
+flowchart TD
+    T[Completed ticket with final_status pass or warning] --> S[Search: internal catalog first, then the candidate registry]
+    S -->|suitable approved vendor| R[Create RFQ: scope must match the ticket snapshot, approved recipients only]
+    S -->|candidate needed| C[Register candidate as pending_review]
+    C --> D{Admin decision with a reason}
+    D -->|reject| X[Rejected, terminal]
+    D -->|approve| R
+    R --> Q[Quotes: structured or raw application/pdf]
+    Q --> P[PDF stored privately, text extracted as untrusted, pending_verification]
+    Q --> V[Human verification: verified values, diff and evidence]
+    P --> V
+    V --> G[Comparison gates: currency, Decimal total within budget, delivery, warranty, verified unexpired compliance evidence]
+    G --> K[Rank eligible quotes by lowest total, then delivery, then quote ID, with an explanatory score]
+    K --> H[Saved comparison, human_decision pending]
+    H --> A[Admin accepts or rejects with a reason, RFQ closed]
+    A --> N[No award, no PO dispatch, no supplier contact, no payment]
+```
+
+### 16.3 Consistency model
+
+- **One atomic write per state change:** each change and its pending audit events go into a single document write (`pending_events`). Delivery to the events collection uses deterministic `event_id`s, so it is idempotent.
+- **If delivery fails:** the committed state is returned with `audit_pending: true`, and reads or `POST …/repair-events` re-deliver the events exactly once.
+- **Duplicates and concurrency:** a duplicate candidate name or quote gives 409, enforced by unique indexes. Candidate decisions are compare-and-set, so concurrent decisions produce one winner. At most one accepted comparison is allowed per RFQ.
+
+### 16.4 Verification record (2026-10-21)
+
+- **Full suite:** 1029 passed (baseline 893 passed and 2 failed in the merged PR #2 code; both failures fixed).
+- **Vendor and UI tests:** 143.
+- **Live checks:** API 40/40 and UI 8/8. See `Docs/PHASE_2_VENDOR_DISCOVERY_RFQ.md` for the full list.
