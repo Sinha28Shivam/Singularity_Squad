@@ -41,6 +41,7 @@ class QuoteSubmission(BaseModel):
 
     vendor_id: str = Field(min_length=3, max_length=80)
     quote_reference: str = Field(min_length=1, max_length=120)
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
     unit_price: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
     tax_amount: Decimal = Field(default=Decimal("0"), ge=0, max_digits=14, decimal_places=2)
     delivery_fee: Decimal = Field(default=Decimal("0"), ge=0, max_digits=14, decimal_places=2)
@@ -55,6 +56,7 @@ class QuoteSubmission(BaseModel):
 class QuoteVerification(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    currency: str = Field(pattern=r"^[A-Z]{3}$")
     unit_price: Decimal = Field(gt=0, max_digits=14, decimal_places=2)
     tax_amount: Decimal = Field(default=Decimal("0"), ge=0, max_digits=14, decimal_places=2)
     delivery_fee: Decimal = Field(default=Decimal("0"), ge=0, max_digits=14, decimal_places=2)
