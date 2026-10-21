@@ -31,6 +31,7 @@ def test_rfq_structured_quote_verification_and_comparison(admin_headers):
     quote = client.post(f"/api/vendor-sourcing/rfqs/{rfq['rfq_id']}/quotes", json={
         "vendor_id": "VEN-002",
         "quote_reference": "Q-GL-100",
+        "currency": "INR",
         "unit_price": "700.00",
         "tax_amount": "3500.00",
         "delivery_fee": "2500.00",
@@ -51,6 +52,7 @@ def test_rfq_structured_quote_verification_and_comparison(admin_headers):
     verified = client.post(
         f"/api/vendor-sourcing/rfqs/{rfq['rfq_id']}/quotes/{quote.json()['quote_id']}/verify",
         json={
+            "currency": "INR",
             "unit_price": "700.00",
             "tax_amount": "3500.00",
             "delivery_fee": "2500.00",
@@ -96,6 +98,7 @@ def test_quote_compliance_and_delivery_are_gates(admin_headers):
     quote_response = client.post(f"/api/vendor-sourcing/rfqs/{rfq_id}/quotes", json={
         "vendor_id": "VEN-002",
         "quote_reference": "Q-FAIL-COMPLIANCE",
+        "currency": "INR",
         "unit_price": "500.00",
         "tax_amount": "0",
         "delivery_fee": "0",
@@ -108,6 +111,7 @@ def test_quote_compliance_and_delivery_are_gates(admin_headers):
     assert quote_response.status_code == 201, quote_response.text
     quote_id = quote_response.json()["quote_id"]
     verified = client.post(f"/api/vendor-sourcing/rfqs/{rfq_id}/quotes/{quote_id}/verify", json={
+        "currency": "INR",
         "unit_price": "500.00",
         "tax_amount": "0",
         "delivery_fee": "0",
