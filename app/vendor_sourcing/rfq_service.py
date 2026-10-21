@@ -21,6 +21,8 @@ from app.data_loader import load_json
 from app.db.errors import PersistenceError
 from app.db.mongo import get_database
 from app.vendor_sourcing import repository
+from app.repositories.ticket_repository import get_ticket
+from app.schemas import EventRequest
 
 
 MAX_PDF_BYTES = 5 * 1024 * 1024
@@ -80,7 +82,41 @@ def _vendor_is_eligible(vendor_id: str) -> bool:
     return bool(candidate and candidate.get("status") == "approved")
 
 
+def _validate_source_ticket(body) -> None:
+    """Bind RFQ scope to a persisted, completed workflow result instead of trusting client-supplied facts."""
+    ticket = get_ticket(body.request_id)
+    if ticket is None:
+        raise ValueError("RFQ must reference an existing persisted workflow ticket.")
+    result = ticket.get("workflow_result") or {}
+    if result.get("final_status") not in {"pass", "warning"}:
+        raise ValueError("RFQ source ticket must have a completed pass/warning workflow result.")
+    if result.get("missing_fields"):
+        raise ValueError("RFQ source ticket still has missing required fields.")
+    raw_request = result.get("request")
+    if not isinstance(raw_request, dict):
+        raise ValueError("RFQ source ticket has no validated request snapshot.")
+    try:
+        source = EventRequest.model_validate(raw_request)
+    except Exception as exc:
+        raise ValueError("RFQ source ticket request snapshot is invalid.") from exc
+    if source.date is None or source.attendees is None or source.budget_limit is None or not source.service:
+        raise ValueError("RFQ source ticket is missing required purchase requirements.")
+    if source.service.casefold() != body.service.casefold():
+        raise ValueError("RFQ service must match the validated source ticket.")
+    if Decimal(str(source.attendees)) != body.quantity:
+        raise ValueError("RFQ quantity must match the validated attendee/quantity count.")
+    if Decimal(str(source.budget_limit)) != body.budget_limit:
+        raise ValueError("RFQ budget must match the validated source ticket.")
+    if source.date != body.delivery_date:
+        raise ValueError("RFQ delivery date must match the validated source ticket.")
+    if source.currency.upper() != body.currency:
+        raise ValueError("RFQ currency must match the validated source ticket.")
+    if source.location and source.location.casefold() != body.delivery_location.casefold():
+        raise ValueError("RFQ delivery location must match the validated source ticket.")
+
+
 def create_rfq(body, actor: str) -> dict:
+    _validate_source_ticket(body)
     if body.delivery_date < _now().date():
         raise ValueError("Delivery date must be today or in the future.")
     if body.response_deadline <= _now():
