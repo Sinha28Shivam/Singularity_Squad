@@ -60,8 +60,54 @@ def test_benchmark_runs_and_reports_parity(tmp_path, monkeypatch, capsys):
     assert "speedup_seq_over_par_median" in data
     assert data["business_outputs"]["happy_path"]["orchestrator/parallel"]["selected_vendor_id"] == "VEN-002"
 
+    # config recorded; no errors; analysis-stage breakdown present (absent for the clarification path)
+    cfg = data["config"]
+    assert cfg["reps"] == 2 and cfg["inject_failure"] is None and cfg["llm_model"] is None
+    assert cfg["parallel_analysis_env_before_run"] == "1"
+    assert cfg["parallel_analysis_env_per_mode"] == {"sequential": "0", "parallel": "1"}
+    for mode in modes.values():
+        assert mode["overall"]["errors"] == 0 and mode["overall"]["n"] == 2 * len(expected)
+        happy = mode["scenarios"]["happy_path"]["analysis"]
+        assert happy["n"] == 2 and happy["policy_ms_median"] >= 15 and happy["vendor_ms_median"] >= 15
+        assert happy["analysis_total_ms_median"] <= mode["scenarios"]["happy_path"]["max_ms"]
+        assert mode["scenarios"]["missing_info"]["analysis"]["analysis_total_ms_median"] is None
+    seq_a = modes["sequential"]["scenarios"]["happy_path"]["analysis"]["analysis_total_ms_median"]
+    par_a = modes["parallel"]["scenarios"]["happy_path"]["analysis"]["analysis_total_ms_median"]
+    assert par_a + 8 < seq_a, (seq_a, par_a)
+
     stdout = capsys.readouterr().out
     assert "| engine | scenario | mode |" in stdout and "SIMULATED" in stdout
+    assert "Analysis stage" in stdout and "Errors (excluded from timings): **0**" in stdout
+
+
+def test_backward_compatible_cli_without_new_flags(tmp_path):
+    bench = _load_script()
+    args = bench.parse_args(["--reps", "3"])
+    assert args.inject_failure is None and args.reps == 3 and args.engines == "orchestrator"
+
+
+def test_injected_failure_counted_as_errors_not_timed(tmp_path, monkeypatch):
+    bench = _load_script()
+    monkeypatch.delenv("WORKPLACEOPS_PARALLEL_ANALYSIS", raising=False)
+    orig_eval, orig_match = policy.evaluate, vendor_matcher.match_vendors
+    out = tmp_path / "bench.json"
+
+    bench.main(["--reps", "2", "--inject-failure", "vendor", "--json", str(out)])
+
+    assert policy.evaluate is orig_eval and vendor_matcher.match_vendors is orig_match
+    assert "WORKPLACEOPS_PARALLEL_ANALYSIS" not in os.environ
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["config"]["inject_failure"] == "vendor"
+    for mode in data["results"]["orchestrator"].values():
+        happy = mode["scenarios"]["happy_path"]
+        # warm-up + 2 reps all fail; no timings recorded for them
+        assert happy["errors"] == 3 and happy["n"] == 0 and happy["median_ms"] is None
+        assert happy["errors_by_type"] == {"AnalysisBranchError": 3}
+        # clarification path never reaches analysis, so it still succeeds and is timed
+        missing = mode["scenarios"]["missing_info"]
+        assert missing["errors"] == 0 and missing["n"] == 2 and missing["median_ms"] is not None
+        assert mode["overall"]["errors"] == 3 * 6 and mode["overall"]["n"] == 2
+    assert data["speedup_seq_over_par_median"]["orchestrator"]["scenarios"]["happy_path"] is None
 
 
 def test_unknown_or_missing_engine_is_skipped_with_note():

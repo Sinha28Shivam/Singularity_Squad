@@ -63,6 +63,20 @@ All numbers below were **measured** in this repository (Windows, Python 3.11.9, 
   - `tests/test_benchmark_script.py`: 3 tests.
 - pyflakes and `git diff --check` are clean.
 
+### Review follow-up (code review of `feat/parallel-analysis-evaluation`)
+
+| Review point | Status |
+|---|---|
+| Shared inputs: defensive isolation | Done. Each branch gets a `model_copy(deep=True)` of `req` and `rules`. A test mutates the branch copy and asserts the caller's objects are unchanged. |
+| Error context | Done. `AnalysisBranchError(branch, cause)` is raised only after both branches finish, checking policy before vendor. |
+| Timing | Done. `result.extra["orchestration"]["analysis_ms"]` records policy, vendor and total. |
+| Dedicated failure audit record | Done. The portal writes a durable `analysis_branch_failed` audit event (branch plus exception type, no message). |
+| Explicit failure tests (no draft PO, API behaviour) | Done for policy and vendor, in both modes. The API returns 500 with a generic body, the ticket is `failed`, and there is no PO, approval or leaked detail. |
+| Parity tests | Done. The §5 matrix compares business outputs and audit order across modes; the timing metadata is excluded. |
+| Real latency measurements | Done: offline, simulated and live LLM (see the table below). |
+| Tests executed | `tests/test_workflow.py`: 10 passed. Full suite: 839 passed. `git diff --check`: clean. |
+| PR mergeability / CI | The branch's commits were already merged into `master` (`5bafefb`, `b24ae52`), so the draft PR is superseded and can be closed. There is no CI workflow in the repo; verification is local. |
+
 ### Latency: sequential vs parallel (`app/orchestrator.py`)
 
 | Setup | Sequential median | Parallel median | Speedup | Parity |

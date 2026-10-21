@@ -1513,7 +1513,14 @@ flowchart TD
 - **Mode switch:** `WORKPLACEOPS_PARALLEL_ANALYSIS` (default on; `0`/`false`/`no`/`off` select sequential), read by `parallel_analysis_enabled()`. `_analyze_in_parallel` remains as an alias. The thread prefix is `workplaceops-analysis`.
 - **Sequential downstream:** draft PO, invoice reconciliation, Critic, approvals and payments stay sequential.
 - **Run metadata:** `result.extra["orchestration"] = {"engine": "orchestrator", "mode": "parallel" | "sequential", "analysis_ms": {"policy", "vendor", "total"}}`. It is not part of the approval snapshot hash.
-- **Portal:** `ticket_service.run_ticket` treats `AnalysisBranchError` like any workflow error: the ticket becomes `failed`, the API returns 500, and no approval request is created.
+- **Portal:** `ticket_service.run_ticket` treats `AnalysisBranchError` like any workflow error: the ticket becomes `failed`, the API returns 500 with a generic message, and no draft PO or approval request is created.
+- **Failure audit:** a durable audit event `analysis_branch_failed` (status `fail`) is written naming the failed branch and the exception type only, never the exception message. Other workflow errors get `workflow_failed`.
+- **Phase 2 hardening** (`Docs/ORCHESTRATION_HARDENING_PHASE_2.md`):
+  - **Legacy endpoint:** `/api/workflow` maps `AnalysisBranchError` to 500 `{"detail": "Workflow analysis failed; the run was stopped and marked as failed."}` and writes the same failure audit event.
+  - **Logging:** one redacted WARNING log line per failure (branch, exception type, mode, no message or request text), and a DEBUG timing line on success.
+  - **Timing:** `extra["orchestration"]["workflow_ms"]` records the end-to-end time.
+  - **Executor:** sequential mode creates no executor.
+  - **Tests:** 886 tests pass.
 
 ### 15.2 Benchmark (`scripts/benchmark_orchestration.py`)
 

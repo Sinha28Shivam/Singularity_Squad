@@ -20,6 +20,7 @@ from app.auth.errors import AuthError
 from app.approvals.errors import ApprovalError
 from app.auth.service import seed_admin_from_env, seed_approvers_from_env
 from app.data_loader import load_json
+from app.orchestrator import AnalysisBranchError
 from app.db import PersistenceError, close_client, ensure_indexes, persistence_mode, ping_database
 from app.db.mongo import db_status
 from app.repositories import get_audit_entries, get_ticket, list_recent_tickets
@@ -180,6 +181,9 @@ app.include_router(vendor_sourcing_router.router)
 _ADMIN_ONLY = [Depends(require_admin)]
 
 
+_WORKFLOW_ANALYSIS_FAILED_MSG = "Workflow analysis failed; the run was stopped and marked as failed."
+
+
 class WorkflowIn(BaseModel):
     text: str
     today: Optional[date] = None
@@ -220,6 +224,9 @@ def workflow(body: WorkflowIn):
         return ticket_service.run_and_persist(body.text, body.today, body.invoice_id)
     except PersistenceError as exc:
         raise HTTPException(503, str(exc)) from None
+    except AnalysisBranchError:
+        # The ticket is already marked failed and audited; never echo the branch exception to the client.
+        raise HTTPException(500, _WORKFLOW_ANALYSIS_FAILED_MSG) from None
 
 
 @app.get("/api/tickets", dependencies=_ADMIN_ONLY)

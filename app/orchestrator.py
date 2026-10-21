@@ -1,6 +1,7 @@
 """Manager / Orchestrator: owns workflow state, delegates to specialist agents, records the audit trail."""
 from __future__ import annotations
 
+import logging
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -9,6 +10,8 @@ from typing import Optional
 
 from app.agents import billing, critic, intake, policy, procurement, vendor_matcher
 from app.schemas import AuditEntry, CheckResult, Evidence, PolicyReport, VendorMatchResult, WorkflowResult
+
+logger = logging.getLogger(__name__)
 
 
 class _Audit:
@@ -73,9 +76,19 @@ def analyze(req, today: date, rules, *, parallel: Optional[bool] = None,
     finish before this returns or raises; a branch exception surfaces as ``AnalysisBranchError`` (policy is
     checked before vendor, so the reported branch is deterministic). Results come back in a fixed order.
     When ``timings`` is given it is filled with ``{"policy": ms, "vendor": ms, "total": ms}``.
+
+    Cancellation: a branch that is already running in a worker thread cannot be cancelled or interrupted in
+    Python. If one branch fails, the other is not cancelled; this call waits for both to finish before
+    raising, so no analysis work is still running once it returns or raises. The sequential fallback
+    (``parallel=False``) runs both branches in the caller's thread and creates no executor.
+
+    Logging is redacted. A failure produces one WARNING line with only the branch name(s), the exception
+    type and the mode, never the exception message or request content. A success produces one DEBUG
+    timing line.
     """
     if parallel is None:
         parallel = parallel_analysis_enabled()
+    mode = "parallel" if parallel else "sequential"
     start = time.perf_counter()
     if parallel:
         # Bounded to two workers; dependent PO / invoice work stays sequential after the join.
@@ -86,12 +99,18 @@ def analyze(req, today: date, rules, *, parallel: Optional[bool] = None,
     else:
         pol_out = _run_policy(req.model_copy(deep=True), today)
         vm_out = _run_vendor(req.model_copy(deep=True), rules.model_copy(deep=True))
+    total_ms = (time.perf_counter() - start) * 1000.0
     if timings is not None:
-        timings.update(policy=round(pol_out[2], 3), vendor=round(vm_out[2], 3),
-                       total=round((time.perf_counter() - start) * 1000.0, 3))
-    for branch, (_, exc, _ms) in (("policy", pol_out), ("vendor", vm_out)):
-        if exc is not None:
-            raise AnalysisBranchError(branch, exc) from exc
+        timings.update(policy=round(pol_out[2], 3), vendor=round(vm_out[2], 3), total=round(total_ms, 3))
+    failed = [(branch, exc) for branch, (_, exc, _ms) in (("policy", pol_out), ("vendor", vm_out))
+              if exc is not None]
+    if failed:
+        branch, exc = failed[0]
+        logger.warning("analysis branch failed branch=%s error=%s mode=%s failed_branches=%s",
+                       branch, type(exc).__name__, mode, ",".join(b for b, _ in failed))
+        raise AnalysisBranchError(branch, exc) from exc
+    logger.debug("analysis completed mode=%s policy_ms=%.3f vendor_ms=%.3f total_ms=%.3f",
+                 mode, pol_out[2], vm_out[2], total_ms)
     return pol_out[0], vm_out[0]
 
 
@@ -100,6 +119,7 @@ _analyze_in_parallel = analyze
 
 def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[str] = None,
                  request_id: str = "REQ-1001") -> WorkflowResult:
+    started = time.perf_counter()
     today = today or date.today()
     audit = _Audit()
     result = WorkflowResult()
@@ -175,7 +195,11 @@ def run_workflow(text: str, today: Optional[date] = None, invoice_id: Optional[s
                           f"invoiced INR {rec.invoiced_total:,.2f}. {rec.recommendation}",
                           evidence=[e for c in rec.checks for e in c.evidence])
 
-    return _finish(result, audit)
+    _finish(result, audit)
+    # End-to-end timing (intake through the approval gate). Only present when analyses ran; the
+    # clarification path intentionally carries no "orchestration" entry.
+    result.extra["orchestration"]["workflow_ms"] = round((time.perf_counter() - started) * 1000.0, 3)
+    return result
 
 
 def _finish(result: WorkflowResult, audit: _Audit) -> WorkflowResult:
