@@ -36,6 +36,7 @@ Stop-Process -Id <PID>
 - `OPENAI_MODEL` (optional, default `gpt-4o-mini`).
 - `OPENAI_BASE_URL` (optional, for Azure/OpenAI-compatible endpoints).
 - `WORKPLACEOPS_OFFLINE=1` forces deterministic mode.
+- `WORKPLACEOPS_PARALLEL_ANALYSIS=0` disables concurrent policy/vendor analysis for debugging; default `1` runs those independent, read-only checks concurrently. Draft PO creation, invoice reconciliation, Critic review, and approval remain downstream gates.
 - `MONGODB_URI` (default `mongodb://localhost:27017/`), `MONGODB_DATABASE` (default `workplaceops`).
 - `ADMIN_USERNAME`, `ADMIN_PASSWORD`: the admin account is created or updated at API startup. If unset there is no admin; there is no default password.
 - `POLICY_RAG_ENABLED` (default on), `POLICY_RAG_SEED` (default on), `POLICY_STORE_DIR` (default `data/policy_store`, git-ignored). Thresholds live in `data/policy_rag_config.json`. Embeddings use the OpenAI key (`text-embedding-3-small`); offline, the system falls back to local vectors.
