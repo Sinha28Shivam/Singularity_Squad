@@ -14,7 +14,7 @@ import { formatDateTime } from "../lib/format";
 import { api, ApiError } from "../api/client";
 import {
   addAdminNote, APPROVAL_TICKET_STATUSES, getAdminAudit, getAdminTicket, getTicketApproval, listInvoices, matchInvoice,
-  NOT_RUNNABLE_STATUSES, reconcileApproval, rejectAdminTicket, runAdminTicket, todayIso,
+  NOT_RUNNABLE_STATUSES, previewInvoiceCheck, reconcileApproval, rejectAdminTicket, runAdminTicket, todayIso,
 } from "../api/requests";
 import "../styles/pages/requests.css";
 
@@ -142,6 +142,61 @@ function InvoiceMatchPanel({ view, onDone }) {
   );
 }
 
+const PREVIEW_NOTE = "Preview only — not saved. This doesn't change the request, its audit trail or any approval, and nothing is paid.";
+
+/** Ad-hoc invoice re-check against the current draft PO (POST /api/reconcile). The result is never stored. */
+export function InvoicePreviewPanel({ po }) {
+  const invoices = useApi(() => listInvoices(), []);
+  const [invoiceId, setInvoiceId] = useState("");
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(null);
+  const [rec, setRec] = useState(null);
+
+  async function check() {
+    if (!invoiceId || pending) return;
+    setPending(true); setError(null); setRec(null);
+    try {
+      setRec(await previewInvoiceCheck(po, invoiceId));
+    } catch (e) {
+      setError(e);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <details className="disclosure">
+      <summary>Check another invoice</summary>
+      <div className="stack-sm">
+        <Notice tone="info" title="Preview only — not saved">
+          Compare any invoice with the current draft PO. This doesn't change the request, its audit trail or any approval, and nothing is paid.
+        </Notice>
+        <div className="row">
+          <div className="field">
+            <label htmlFor="preview-invoice">Invoice to re-check</label>
+            <select id="preview-invoice" className="select" value={invoiceId} disabled={invoices.loading || pending}
+              onChange={(e) => { setInvoiceId(e.target.value); setRec(null); setError(null); }}>
+              <option value="">Choose an invoice</option>
+              {(invoices.data || []).map((i) => <option key={i.invoice_id} value={i.invoice_id}>{i.invoice_id}{i.vendor_id ? ` · ${i.vendor_id}` : ""}</option>)}
+            </select>
+          </div>
+        </div>
+        {invoices.error && <InlineError error={invoices.error} />}
+        <div><button type="button" className="btn" disabled={!invoiceId || pending} onClick={check}>
+          {pending ? "Checking…" : "Check invoice"}
+        </button></div>
+        <InlineError error={error} />
+        {rec && (
+          <section className="card-quiet stack-sm" aria-label="Invoice preview result" data-testid="invoice-preview">
+            <p className="small"><strong>{PREVIEW_NOTE}</strong></p>
+            <ReconciliationDetails rec={rec} />
+          </section>
+        )}
+      </div>
+    </details>
+  );
+}
+
 export default function AdminRequestDetailPage() {
   const { ticketId } = useParams();
   const { data: view, error, loading, reload, setData } = useApi(() => loadAdminTicket(ticketId), [ticketId]);
@@ -228,7 +283,7 @@ export default function AdminRequestDetailPage() {
 
       <section className="card req-section" aria-labelledby="ad-result">
         <h2 id="ad-result">Workflow result</h2>
-        <WorkflowResult result={result} ticketId={tid} />
+        <WorkflowResult result={result} ticketId={tid} invoiceExtra={po ? <InvoicePreviewPanel po={po} /> : null} />
       </section>
 
       {showApproval && (

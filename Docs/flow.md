@@ -14,7 +14,7 @@ This document covers:
 - Dummy payment initiator: a **simulation-only** payment instruction for an approved, reconciled invoice, behind a backend eligibility gate (section 14).
 - Parallel orchestration: policy and vendor analyses run concurrently, plus an isolated LangGraph evaluation and benchmark (section 15).
 - Vendor sourcing (advisory only): candidate onboarding, the RFQ lifecycle, quotes, verification and comparison (section 16).
-- React UI (`frontend/`): a white-first, minimal interface on the same APIs; Streamlit is kept during the transition (section 17).
+- React UI (`frontend/`): the white-first, minimal web interface on the same APIs (section 17). It replaced the earlier Streamlit UI on 2026-10-21. Older verification records below mention Streamlit as history only.
 
 All data is synthetic. The system creates a **draft PO only**. It never makes a purchase or real payment. Saving a draft PO to the database does **not** approve or issue it. The payment simulator (section 14) never contacts a bank or gateway and never transfers money: every record says `mode: "SIMULATION"` and `money_transferred: false`.
 
@@ -44,15 +44,17 @@ mongosh --eval "db.adminCommand('ping')"
 python -m uvicorn app.main:app --port 8000 --reload
 #    Swagger: http://127.0.0.1:8000/docs  ·  Health: http://127.0.0.1:8000/api/health
 
-# 5. Terminal 2: start the UI (ui\app.py also works; streamlit_app.py is a shim that runs it)
-python -m streamlit run ui\streamlit_app.py
-#    UI: http://localhost:8501   (set WORKPLACEOPS_API if the API is not on 127.0.0.1:8000)
-#    Log in as the admin from .env, or click "Create account" to register as a user.
+# 5. Terminal 2: start the React UI
+cd frontend; npm install; npm run dev
+#    UI: http://localhost:5173   (set VITE_API_BASE_URL if the API is not on http://localhost:8000;
+#    the API allows the UI origin via CORS_ALLOWED_ORIGINS)
+#    Log in as the admin from .env, or click "Create an account" to register as a user.
 
 # 6. Run tests. Most use in-memory mongomock. test_mongo_integration.py and
 #    test_persistence_restart.py use local MongoDB in throwaway databases (dropped afterwards)
 #    and skip themselves if MongoDB is not running.
 python -m pytest -q
+cd frontend; npm test; npm run build    # UI tests (Vitest) and production build
 
 # 7. Pre-commit checks
 git check-ignore -v .env      # must print the .env rule
@@ -86,7 +88,7 @@ Invoke-RestMethod -Method Post "http://127.0.0.1:8000/api/admin/tickets/<TICKET_
 ```text
 AI_Hackathon_2.0/
 ├── .env / .env.example          # Secrets (git-ignored) / template (committed)
-├── requirements.txt             # fastapi, pydantic, openai, streamlit, pymongo, mongomock (tests) ...
+├── requirements.txt             # fastapi, pydantic, openai, pymongo, pypdf, mongomock (tests) ...
 ├── pytest.ini                   # registers the "real_mongo" marker
 ├── README.md / flow.md          # Docs
 ├── PHASE_1_MONGODB_PERSISTENCE.md  # Phase 1 spec
@@ -131,30 +133,25 @@ AI_Hackathon_2.0/
 │   ├── policies/*.md, policy_rules.json, vendors.json
 │   ├── invoices.json, deliveries.json, invoice_history.json
 │   └── sample_requests.json
-├── ui/                          # Frontend: HTTP only, never imports app/
-│   ├── app.py                   # Entry point: health sidebar, login state, role-based st.navigation
-│   ├── streamlit_app.py         # Shim, so "streamlit run ui\streamlit_app.py" still works
-│   ├── lib/api.py               # HTTP helpers; adds the bearer token; a 401 logs out
-│   ├── lib/render.py            # Shared renderers: pipeline, 6 result tabs, audit, INR formatting
-│   └── pages_portal/
-│       ├── login.py             # Log in / Create account
-│       ├── user_portal.py       # New request form, My requests, outcome, notes, edit & resubmit
-│       ├── admin_console.py     # Queue + counts, ticket detail, run/re-run, reject (reviewed only), notes, reconcile
-│       └── approvals.py         # Approver queue + detail, 2-step confirm, idempotent decisions (Phase 2)
+├── frontend/                    # React UI (Vite): HTTP only, never imports app/
+│   ├── src/api/client.js        # fetch wrapper: bearer token, timeouts, safe error messages; a 401 signs out
+│   ├── src/api/*.js             # requests, approvals, policies, vendorSourcing, payments, auth
+│   ├── src/components/          # AppLayout, PageHeader, DataTable, StatusBadge, States, ConfirmDialog, Tabs, WorkflowResult
+│   ├── src/pages/               # one file per screen (+ __tests__/ with Vitest + Testing Library)
+│   ├── src/routes.js, App.jsx   # role-based navigation and routes (UX only; the API authorizes)
+│   └── src/styles/              # tokens.css, global.css, components.css, pages/*.css
 └── tests/
     ├── conftest.py              # sys.path, offline LLM, fresh mongomock client per test
     ├── test_intake.py, test_policy.py, test_vendor_procurement.py, test_billing.py, test_workflow.py
     ├── test_repositories.py     # repository behaviour on mongomock
     ├── test_api_persistence.py  # ticket endpoints, 404/422/503, disabled mode, invoice outcomes
     ├── test_persistence_failures.py # failure at each write stage, retry idempotency, no secret leaks
-    ├── test_ui_tickets.py       # AppTest: admin console shows the stored persisted flag, 404/503
     ├── test_auth.py             # signup/login/logout, hashing, token expiry, admin seeding, 401/403
     ├── test_ticket_lifecycle.py # submit -> run -> pending_approval, re-run, needs_info, ownership, views
     ├── test_approval_policy.py, test_approval_service.py, test_approval_concurrency.py  # Phase 2 core
     ├── test_approval_api.py     # Phase 2 authz matrix + HTTP lifecycle
     ├── test_approval_acceptance.py, test_approval_persistence.py  # real MongoDB + uvicorn (spec §18)
-    ├── test_ui_approvals.py     # AppTest: approver page, confirmation, 409/503 handling
-    ├── test_ui_portal.py        # AppTest: login, user submit/edit, admin run, no admin approve, 401 handling
+    ├── test_ui_support_endpoints.py, test_react_ui_backend_support.py  # API support for the React UI
     ├── test_mongo_integration.py# real local MongoDB: indexes + duplicate-key behaviour
     └── test_persistence_restart.py # real MongoDB + 2 real uvicorn processes: survives API restart
 ```
@@ -165,8 +162,8 @@ Also at the repo root: `.gitattributes` (LF line endings). All text files are sa
 
 ```mermaid
 flowchart LR
-    subgraph UI["ui/"]
-        ST[app.py + pages_portal/*<br/>lib/api.py, lib/render.py]
+    subgraph UI["frontend/ (React)"]
+        ST[pages + components<br/>src/api/client.js]
     end
     subgraph APP["app/"]
         MAIN[main.py]
@@ -241,7 +238,7 @@ flowchart LR
 
 **Layering rules:**
 
-- **UI → API over HTTP only.** The UI never imports `app/`. Streamlit `session_state` holds only the login token and cached display data; MongoDB is the source of truth.
+- **UI → API over HTTP only.** The React UI (`frontend/`) never imports `app/`. It keeps only the bearer token (in `sessionStorage`) and the data on screen; MongoDB and every business rule stay behind the API.
 - **Every ticket endpoint is authenticated.** `deps.py` resolves the bearer token. `require_admin` guards `/api/admin/*` and the legacy endpoints; `/api/my/*` is scoped to the owner.
 - **Routes (`main.py`, `routers/`) validate input and map errors.** A missing or foreign ticket gives `404`, a malformed ID `422`, an illegal transition `409`, a missing or expired token `401`, the wrong role `403`, and a database failure `503`.
 - **`services/ticket_service.py` owns the order of persistence steps.** It calls the orchestrator, then the repositories.
@@ -257,7 +254,7 @@ In the portal, a run starts when the admin clicks **Run workflow**, which calls 
 
 ```mermaid
 flowchart TD
-    A([User submits request in Streamlit]) --> B["main.workflow()<br/>validate body (400 if empty)"]
+    A([Admin calls the legacy workflow endpoint]) --> B["main.workflow()<br/>validate body (400 if empty)"]
     B --> S0{"persistence_mode()"}
     S0 -->|disabled| S1["new_ticket_id()<br/>run_workflow(..., request_id=ticket_id)<br/>persisted = False"]
     S1 --> R
@@ -343,7 +340,7 @@ The synthetic invoices in `data/invoices.json` reference the placeholder `DRAFT-
 sequenceDiagram
     autonumber
     actor U as User
-    participant UI as streamlit_app.py
+    participant UI as React UI
     participant API as main.py
     participant SVC as ticket_service.py
     participant O as orchestrator.py
@@ -503,48 +500,53 @@ Neither includes the URI or credentials; this was verified with a URI containing
 
 ---
 
-## 7. Streamlit UI flow (role-based)
+## 7. UI flow (role-based, React `frontend/`)
 
 ```mermaid
 flowchart LR
-    START([ui/app.py]) --> AUTHQ{logged in?}
-    AUTHQ -->|no| LOGIN[Login page<br/>Log in / Create account]
+    START([frontend/src/App.jsx]) --> AUTHQ{signed in?}
+    AUTHQ -->|no| LOGIN[LoginPage<br/>Sign in or Create an account]
     LOGIN -->|POST /api/auth/login or signup| AUTHQ
     AUTHQ -->|role = user| UP[My requests]
-    AUTHQ -->|role = admin| AC[Admin console]
+    AUTHQ -->|role = admin| AO[Overview]
+    AUTHQ -->|role = approver| AP[Pending approvals]
 
-    subgraph USER["User portal (pages_portal/user_portal.py)"]
-        UP --> NEW[New request form<br/>POST /api/my/tickets]
-        UP --> LIST[My requests list<br/>GET /api/my/tickets]
-        LIST --> DET[Request detail: outcome, PO summary,<br/>questions, notes, decision<br/>GET /api/my/tickets/id]
-        DET -->|status submitted or needs_info| EDIT[Edit and resubmit<br/>PUT /api/my/tickets/id]
-        DET --> UNOTE[Add note<br/>POST .../notes]
+    subgraph USER["Requester pages"]
+        UP --> NEW[NewRequestPage<br/>POST /api/my/tickets]
+        UP --> LIST[MyRequestsPage, server search + paging<br/>GET /api/my/tickets?q=&status=&offset=]
+        LIST --> DET[RequestDetailPage: outcome, draft PO,<br/>questions, approval, notes<br/>GET /api/my/tickets/id]
+        DET -->|status allows it| EDIT[Edit and resubmit<br/>PUT /api/my/tickets/id]
     end
 
-    subgraph ADMIN["Admin console (pages_portal/admin_console.py)"]
-        AC --> Q[Queue + status counts + filter<br/>GET /api/admin/tickets]
-        Q --> AD[Ticket detail<br/>GET /api/admin/tickets/id]
-        AD --> RUN[Run / Re-run: demo date + invoice<br/>POST .../run]
-        RUN --> TABS[Pipeline + 6 result tabs<br/>lib/render.py]
-        AD --> DEC[Reject reviewed ticket + note<br/>POST .../decision]
-        AD --> ANOTE[Add note<br/>POST .../notes]
-        TABS --> AUD[Load saved audit<br/>GET .../audit]
+    subgraph ADMIN["Admin pages"]
+        AO --> Q[RequestQueuePage<br/>GET /api/admin/tickets?q=&status=&offset=]
+        Q --> AD[AdminRequestDetailPage<br/>GET /api/admin/tickets/id]
+        AD --> RUN[Run or re-run<br/>POST .../run]
+        RUN --> WR[WorkflowResult: plain-language steps,<br/>evidence in disclosures]
+        AD --> DEC[Close a reviewed request<br/>POST .../decision]
+        AD --> PREV[Invoice preview, not saved<br/>POST /api/reconcile]
+        AO --> SRC[Vendor sourcing, RFQs and quotes]
+        AO --> POL[Policy library with search, policy rules]
+        AO --> PAY[Payments Simulation, when enabled]
+    end
+
+    subgraph APPROVER["Approver pages"]
+        AP --> APD[ApprovalDetailPage<br/>POST /api/approvals/id/decision]
+        AP --> PR[Policy review: rules and rate cards]
     end
 ```
 
 **UI behaviour:**
 
-- The sidebar shows API, LLM and DB health, "Signed in as <name> (<role>)", and **Logout**. A disclaimer banner appears on every page.
-- The admin console has **no Approve button** (Phase 2): approvals belong to approvers. **Reject** appears only for `reviewed` tickets. **Run** is disabled when the ticket is approved, rejected or processing. The backend enforces the same rules (`403` / `409`).
-- The admin ticket banner shows the stored `workflow_result.persisted` flag as saved, plus the run count and who ran it last.
-- Error messages:
-  - `401` → "Session expired — please log in again." The user is logged out.
-  - `404` → "Ticket not found."
-  - `409` → the backend's message.
-  - `503` → "Database unavailable…"
-  - Backend down → a hint with the start command.
-  - Tracebacks are never shown.
-- The user portal never displays vendor evaluations, invoice checks, policy checks or the audit trail; the API doesn't send them.
+- **Shell:** a sidebar with role-based navigation (collapsible under 900 px), and a top bar with the page title and role. Sign out is in the sidebar footer.
+- **Admins never approve:** there is no Approve control for admins, and the backend enforces it with `403`. Admins can view approvals read-only.
+- **Server-confirmed actions:** consequential actions open a confirmation dialog, with a reason when the API requires one. The dialog closes and shows the result only after the server confirms.
+- **Errors come from `src/api/client.js`:**
+  - `401` clears the session and returns to sign-in.
+  - `403`, `404`, `409`, `413`, `422` and `503` show the server's `detail`.
+  - Network failures say the server can't be reached.
+  - HTML, tracebacks and raw bodies are never shown.
+- **Requester privacy:** requesters never see vendor evaluations, invoice checks or the audit trail; the API doesn't send them.
 
 ---
 
@@ -564,6 +566,8 @@ flowchart LR
 
 ## 9. Tests (`tests/`)
 
+> UI tests now live in `frontend/` (Vitest + Testing Library, `npm test`). The Streamlit AppTest files listed in older sections were removed with the Streamlit UI on 2026-10-21.
+
 | File | Covers |
 |---|---|
 | `test_intake.py`, `test_policy.py` | Extraction, BM25 retrieval, policy checks |
@@ -572,10 +576,10 @@ flowchart LR
 | `test_repositories.py` | Serialization, `None` for unknown tickets, audit order, duplicate and conflict events, PO upsert idempotency, draft-only rule, error mapping, no `_id` |
 | `test_api_persistence.py` | Unique ticket IDs, retrieval, audit order, 404/422/503, `persistence_error` marking, disabled mode, no PO when over budget, invoice outcomes unchanged with unique IDs |
 | `test_persistence_failures.py` | Failure at create / PO / audit / ticket-update stages returns a safe 503 and leaves the ticket as `persistence_error` with no snapshot. Also: partial state can be diagnosed, a retry doesn't duplicate data, logs leak no credentials or request text, and the success snapshot equals the response. |
-| `test_ui_tickets.py` | Streamlit AppTest (admin console): a loaded ticket shows the stored `persisted` value (true or false); friendly 404 and 503 messages; requests without the admin token get `401` |
+| `test_ui_tickets.py` | Streamlit AppTest (admin console): a loaded ticket shows the stored `persisted` value (true or false); friendly 404 and 503 messages; requests without the admin token get `401` *(Removed with the Streamlit UI on 2026-10-21; covered by `frontend/src/**/__tests__`.)* |
 | `test_auth.py` | Signup and auto-login, duplicate username/email `409` (case-insensitive), validation `422`, identical `401` for an unknown user or wrong password, missing/garbage/expired token `401`, logout revokes the token, admin seeding and re-seeding, no escalation of existing users, `role` in the signup body ignored, salted hashes, no secrets in responses, `require_admin` `403` |
 | `test_ticket_lifecycle.py` | Submit (no run, no PO); ownership isolation (`404`); admin queue, counts and filter; run → reviewed with persisted snapshot and draft PO; re-run keeps one PO and audit sequences contiguous; approve (PO still `draft`) and reject; run after a decision `409`; approve when blocked `409`; needs_info → edit and resubmit → re-run; notes from both sides; the user view has no internals; concurrent-run guard; form → request text mapping (numbers in notes can't override the form) |
-| `test_ui_portal.py` | Streamlit AppTest with a fake backend: login and signup per role, user submit payload, list and detail with no internals, needs_info edit (`PUT`), admin queue, run, tabs, approve/reject enablement, notes, `409` messages, `401` logs out, shim entry point |
+| `test_ui_portal.py` | Streamlit AppTest with a fake backend: login and signup per role, user submit payload, list and detail with no internals, needs_info edit (`PUT`), admin queue, run, tabs, approve/reject enablement, notes, `409` messages, `401` logs out, shim entry point *(Removed with the Streamlit UI on 2026-10-21; covered by `frontend/src/**/__tests__`.)* |
 | `test_mongo_integration.py` | Real local MongoDB: index names and uniqueness, duplicate-key behaviour (skipped if MongoDB is down) |
 | `test_persistence_restart.py` | **Acceptance test.** Real MongoDB in a unique throwaway database, against real uvicorn process #1, then process #2. Submits a ticket, restarts, and checks the ticket, snapshot, draft PO and audit history are identical. Also checks that an over-budget ticket stores no PO. Skips if MongoDB is unavailable. |
 
@@ -1319,7 +1323,7 @@ The payment step is a local, deterministic simulator behind a backend eligibilit
 | `app/payments/tool.py` | The narrow agent tool `create_simulated_payment(CreateSimulatedPaymentToolInput(ticket_id, invoice_id, purchase_order_id, idempotency_key), *, actor, confirmed_by_user)`. Amount and currency come from canonical records and the actor is injected by the backend. It has no URL, provider, mode or account fields, and it is not wired to the LLM. |
 | `app/repositories/payment_repository.py` | `payment_simulations` and `payment_simulation_events`. Unique indexes on `payment_id`, `idempotency_key_hash` and `intent_key` (`ticket_id|invoice_id`). Status changes are compare-and-set and checked against `ALLOWED_TRANSITIONS`. |
 | `app/routers/payments.py` | `/api/payments/simulation*` routes, plus a safe 422 body for this prefix (field names only, no echoed input). |
-| `ui/pages_portal/payments.py` | The "Payments (Simulation)" page: admin full flow, approver read-only. |
+| `frontend/src/pages/SimulatedPaymentsPage.jsx` | The "Payments (Simulation)" page (admin; shown when payments are enabled). *(Was `ui/pages_portal/payments.py` before the React cutover.)* |
 
 ### 14.2 API (`/api/payments/simulation`)
 
@@ -1581,7 +1585,7 @@ Specs: `Docs/WorkplaceOps_Master_Review_and_Vendor_Discovery_RFQ_Plan.md` and `D
 | `app/vendor_sourcing/scoring.py`, `data/vendor_scoring_policy.json` | Versioned weights (`vsp-1`, which must sum to 1.0). The score is explanatory only. |
 | `app/vendor_sourcing/metrics.py` | In-process counters (`GET /metrics`). |
 | `app/routers/vendor_sourcing.py`, `app/routers/vendor_candidates.py` | Routes with a uniform `{"detail": …}` error shape and an optional `X-Correlation-ID` header. |
-| `ui/pages_portal/vendor_sourcing.py` | The admin **🏪 Vendor sourcing** page (Search, Candidates, RFQs, Quotes, Compare, Audit). |
+| `frontend/src/pages/VendorSourcingPage.jsx`, `RfqsPage.jsx`, `RfqDetailPage.jsx` | The admin **Vendor sourcing** and **RFQs & quotes** pages. *(Was `ui/pages_portal/vendor_sourcing.py` before the React cutover.)* |
 
 ### 16.2 Flow
 
@@ -1620,7 +1624,7 @@ flowchart TD
 
 ## 17. React UI (`frontend/`, spec `Docs/REACT_UI_MIGRATION_AND_DESIGN.md`)
 
-This is a white-first, minimal React UI on the same FastAPI APIs. Streamlit (`ui/`) stays available until the React UI is accepted.
+This is the white-first, minimal React UI on the same FastAPI APIs. It is the only UI: the Streamlit UI (`ui/`) and its tests were removed on 2026-10-21 after feature parity was verified (see 17.1).
 
 ```mermaid
 flowchart LR
@@ -1635,3 +1639,14 @@ flowchart LR
 - **Routes and roles:** `src/routes.js` builds the navigation by role and `src/App.jsx` redirects users away from pages for other roles. This is user experience only; every API call is still authorized by the backend.
 - **Server-confirmed results:** consequential actions go through `ConfirmDialog`. It sends the request, stays open with the server's message on error, and closes only after the server confirms, so the UI never shows a decision the server didn't make.
 - **Verification (2026-10-21):** 140 frontend tests, a production build, Python suite 1032 passed, and a real-browser end-to-end run of 23/23 checks (requester → admin run → approver approval → requester sees Approved, plus mobile and keyboard checks). Details are in the spec's implementation status section.
+
+### 17.1 Parity and cutover (2026-10-21)
+
+- **New API support for the UI:**
+  - Ticket lists take `q`, `status` and `offset`, and return `total` and `next_offset`.
+  - `GET /api/policy-documents/limits` and `GET /api/policy-rules/facts`.
+  - Candidate responses carry `allowed_decisions`.
+  - `GET /api/vendor-sourcing/rfqs/{id}/comparisons/{cid}`.
+- **Ported from Streamlit:** policy search, the ad-hoc invoice preview (`POST /api/reconcile`, not saved) and sourcing metrics.
+- **Removed:** `ui/`, the 7 Streamlit AppTest files, and the `streamlit` and `requests` dependencies. React is the only UI. Rollback is a `git revert` of the cutover commit.
+- **Verification:** frontend 165 tests and a production build; Python 906 passed; real-browser E2E 28/28.

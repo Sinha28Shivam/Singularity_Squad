@@ -9,8 +9,8 @@ import { EmptyState, ErrorState, InlineError, LoadingState, Notice } from "../co
 import { useApi } from "../lib/useApi";
 import { formatDate, formatDateTime, formatMoney, humanize } from "../lib/format";
 import {
-  CANDIDATE_STATUSES, CANDIDATE_TRANSITIONS, MIN_REASON, candidateEvents, createCandidate, decideCandidate,
-  getCandidate, listCandidates, searchVendors,
+  CANDIDATE_STATUSES, MIN_REASON, allowedDecisions, candidateEvents, createCandidate, decideCandidate,
+  getCandidate, getSourcingMetrics, listCandidates, searchVendors,
 } from "../api/vendorSourcing";
 import "../styles/pages/sourcing.css";
 
@@ -44,7 +44,80 @@ export default function VendorSourcingPage() {
       {tab === "directory"
         ? <DirectoryTab onOpenCandidate={openCandidate} />
         : <CandidatesTab selected={selected} onSelect={setSelected} />}
+      <ActivitySection />
     </div>
+  );
+}
+
+// ------------------------------------------------------------------------------------------ activity (metrics)
+const METRIC_LABELS = {
+  candidates_submitted: "Candidates registered",
+  decisions_by_type: "Candidate decisions",
+  rfqs_created: "RFQs created",
+  quotes_by_type: "Quotes recorded",
+  verifications: "Quote verifications",
+  ineligible_reasons: "Quotes excluded from ranking",
+  comparisons: "Comparisons run",
+  persistence_failures: "Save failures",
+};
+
+export function metricRows(data) {
+  const counters = data?.counters && typeof data.counters === "object" ? data.counters : {};
+  return Object.entries(counters).map(([name, v]) => {
+    const total = typeof v === "number" ? v : Number(v?.total ?? 0);
+    const byLabel = v && typeof v === "object" && v.by_label && typeof v.by_label === "object" ? Object.entries(v.by_label) : [];
+    return { name, label: METRIC_LABELS[name] || humanize(name), total: Number.isFinite(total) ? total : 0, byLabel };
+  });
+}
+
+function ActivitySection() {
+  const [state, setState] = useState({ data: null, error: null, loading: false, opened: false });
+  const reload = useCallback(async () => {
+    setState((s) => ({ ...s, loading: true, error: null, opened: true }));
+    try {
+      const data = await getSourcingMetrics();
+      setState({ data, error: null, loading: false, opened: true });
+    } catch (error) {
+      setState({ data: null, error, loading: false, opened: true });
+    }
+  }, []);
+  const { data, error, loading, opened } = state;
+  const rows = metricRows(data);
+  return (
+    <details className="disclosure" onToggle={(e) => { if (e.currentTarget.open && !opened && !loading) reload(); }}>
+      <summary>Activity since the API started</summary>
+      <section className="stack-sm" aria-labelledby="sourcing-activity-h">
+      <div className="row-between">
+        <h2 id="sourcing-activity-h" className="sourcing-section-title">Activity</h2>
+        <button type="button" className="btn btn-ghost btn-sm" onClick={reload} disabled={loading}>Refresh</button>
+      </div>
+      <p className="muted small">Counts since the API started. They reset when the API restarts and are not a business report.</p>
+      {!opened ? null : loading && !data ? <LoadingState label="Loading activity…" /> : error ? <ErrorState error={error} onRetry={reload} title="Activity is unavailable" /> :
+        rows.length === 0 ? <p className="muted small">No activity recorded since the API started.</p> : (
+          <>
+            <div className="grid-3" data-testid="sourcing-activity">
+              {rows.map((r) => (
+                <div key={r.name} className="stat">
+                  <span className="stat-value">{r.total}</span>
+                  <span className="stat-label">{r.label}</span>
+                </div>
+              ))}
+            </div>
+            {rows.some((r) => r.byLabel.length) && (
+              <details className="disclosure">
+                <summary>Breakdown</summary>
+                <ul className="event-list">
+                  {rows.filter((r) => r.byLabel.length).map((r) => (
+                    <li key={r.name}><strong>{r.label}</strong>
+                      <span className="muted"> · {r.byLabel.map(([k, n]) => `${humanize(k)}: ${n}`).join(" · ")}</span></li>
+                  ))}
+                </ul>
+              </details>
+            )}
+          </>
+        )}
+      </section>
+    </details>
   );
 }
 
@@ -334,7 +407,7 @@ function CandidateDetail({ candidateId, onClose, onChanged }) {
   if (loading && !cand) return <section className="card"><LoadingState label="Loading candidate…" /></section>;
   if (error) return <section className="card"><ErrorState error={error} onRetry={reload} /></section>;
   if (!cand) return null;
-  const allowed = CANDIDATE_TRANSITIONS[cand.status] || [];
+  const allowed = allowedDecisions(cand).filter((d) => DECISION_COPY[d]);
   const evidence = Array.isArray(cand.compliance_evidence) ? cand.compliance_evidence : [];
   const history = Array.isArray(cand.status_history) ? cand.status_history : [];
   const copy = decision ? DECISION_COPY[decision] : null;

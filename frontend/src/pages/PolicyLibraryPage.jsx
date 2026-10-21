@@ -1,9 +1,11 @@
-import { useCallback, useRef, useState } from "react";
+import { Fragment, useCallback, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  archiveDocument, DEFAULT_MAX_FILE_MB, DOCUMENT_STATUSES, DOCUMENT_TYPES, extractRules, getDocument, listDocuments,
-  listRateCards, MAX_FILES_PER_UPLOAD, reprocessDocument, uploadDocuments, verifyRateCard,
+  archiveDocument, DEFAULT_MAX_FILE_MB, DOCUMENT_STATUSES, DOCUMENT_TYPES, extractRules, getDocument, getUploadLimits,
+  listDocuments, listRateCards, MAX_FILES_PER_UPLOAD, reprocessDocument, SEARCH_TOP_K_MAX, searchPolicies, uploadDocuments,
+  verifyRateCard,
 } from "../api/policies";
+import { citationLabel } from "../components/WorkflowResult";
 import ConfirmDialog from "../components/ConfirmDialog";
 import DataTable from "../components/DataTable";
 import PageHeader from "../components/PageHeader";
@@ -207,14 +209,62 @@ function emptyMeta() {
   return { document_type: "company_policy", vendor_key: "", version_label: "", logical_key: "", effective_from: "", effective_to: "" };
 }
 
-function validateFiles(files) {
+const MB = 1024 * 1024;
+const fmtMb = (n) => `${Number(n).toLocaleString("en-IN", { maximumFractionDigits: 2 })} MB`;
+
+/** Normalise GET /api/policy-documents/limits; null (endpoint missing) -> null so the fallback copy is used. */
+export function normalizeLimits(raw) {
+  if (!raw || typeof raw !== "object") return null;
+  const num = (v) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : null);
+  return {
+    fileMb: num(raw.upload_max_mb),
+    batchMb: num(raw.upload_batch_max_mb),
+    maxFiles: num(raw.max_files_per_batch),
+    maxPages: num(raw.max_pdf_pages),
+    types: Array.isArray(raw.allowed_content_types) && raw.allowed_content_types.length ? raw.allowed_content_types : ["application/pdf"],
+  };
+}
+
+function validateFiles(files, limits) {
   const errs = [];
-  if (files.length > MAX_FILES_PER_UPLOAD) errs.push(`Select at most ${MAX_FILES_PER_UPLOAD} files.`);
+  const maxFiles = limits?.maxFiles ?? MAX_FILES_PER_UPLOAD;
+  const fileMb = limits?.fileMb ?? DEFAULT_MAX_FILE_MB;
+  const types = limits?.types ?? ["application/pdf"];
+  if (files.length > maxFiles) errs.push(`Select at most ${maxFiles} files.`);
   for (const f of files) {
-    if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") errs.push(`${f.name}: only PDF files are accepted.`);
-    if (f.size > DEFAULT_MAX_FILE_MB * 1024 * 1024) errs.push(`${f.name}: larger than ${DEFAULT_MAX_FILE_MB} MB.`);
+    const typeOk = f.type ? types.includes(f.type) : /\.pdf$/i.test(f.name);
+    if (!typeOk) errs.push(`${f.name}: only PDF files are accepted.`);
+    if (!f.size) errs.push(`${f.name}: the file is empty.`);
+    else if (f.size > fileMb * MB) errs.push(`${f.name}: larger than ${fmtMb(fileMb)}.`);
+  }
+  if (limits?.batchMb) {
+    const total = files.reduce((s, f) => s + (f.size || 0), 0);
+    if (total > limits.batchMb * MB) errs.push(`The selected files total more than ${fmtMb(limits.batchMb)}. Upload them in smaller batches.`);
   }
   return errs;
+}
+
+function LimitsNotice({ limits }) {
+  if (!limits) {
+    return (
+      <Notice tone="info">
+        PDF only · up to {MAX_FILES_PER_UPLOAD} files per upload · about {DEFAULT_MAX_FILE_MB} MB per file (the server enforces the
+        exact limit). Each file is checked, extracted and indexed on its own; one bad file does not block the others.
+        Rate-card rows always start as needing review.
+      </Notice>
+    );
+  }
+  const parts = ["PDF only"];
+  if (limits.maxFiles) parts.push(`up to ${limits.maxFiles} files per upload`);
+  if (limits.fileMb) parts.push(`up to ${fmtMb(limits.fileMb)} per file`);
+  if (limits.batchMb) parts.push(`up to ${fmtMb(limits.batchMb)} per upload`);
+  if (limits.maxPages) parts.push(`up to ${limits.maxPages} pages per PDF`);
+  return (
+    <Notice tone="info" title="Upload limits">
+      <span data-testid="upload-limits">{parts.join(" · ")}.</span> The server checks every file again. Each file is checked,
+      extracted and indexed on its own; one bad file does not block the others. Rate-card rows always start as needing review.
+    </Notice>
+  );
 }
 
 function validateMeta(m) {
@@ -227,6 +277,8 @@ function validateMeta(m) {
 }
 
 function UploadSection({ onUploaded }) {
+  const limitsApi = useApi(() => getUploadLimits().catch(() => null), []);
+  const limits = normalizeLimits(limitsApi.data);
   const inputRef = useRef(null);
   const [files, setFiles] = useState([]);
   const [metas, setMetas] = useState([]);
@@ -240,7 +292,7 @@ function UploadSection({ onUploaded }) {
     const list = Array.from(e.target.files || []);
     setFiles(list);
     setMetas(list.map(() => emptyMeta()));
-    setFileErrors(validateFiles(list));
+    setFileErrors(validateFiles(list, limits));
     setMetaErrors([]);
     setResults(null);
     setError(null);
@@ -252,7 +304,7 @@ function UploadSection({ onUploaded }) {
   async function submit(e) {
     e.preventDefault();
     if (!files.length || pending) return;
-    const fe = validateFiles(files);
+    const fe = validateFiles(files, limits);
     const me = metas.map(validateMeta);
     setFileErrors(fe);
     setMetaErrors(me);
@@ -274,11 +326,7 @@ function UploadSection({ onUploaded }) {
 
   return (
     <form className="stack" onSubmit={submit} noValidate>
-      <Notice tone="info">
-        PDF only · up to {MAX_FILES_PER_UPLOAD} files per upload · about {DEFAULT_MAX_FILE_MB} MB per file (the server enforces the
-        exact limit). Each file is checked, extracted and indexed on its own; one bad file does not block the others.
-        Rate-card rows always start as needing review.
-      </Notice>
+      <LimitsNotice limits={limits} />
       <div className="field">
         <label htmlFor="policy-files" className="required">PDF files</label>
         <input id="policy-files" ref={inputRef} type="file" accept="application/pdf,.pdf" multiple onChange={pick}
@@ -367,6 +415,167 @@ function UploadSection({ onUploaded }) {
   );
 }
 
+// ------------------------------------------------------------------ search
+const INSUFFICIENT = "Insufficient evidence — no sufficiently relevant passage was found in the ready policy documents. "
+  + "Do not rely on this search to decide.";
+const RETRIEVAL = {
+  hybrid: ["Semantic + keyword search", "success", null],
+  hybrid_local_hash: ["Local hashed vectors + keywords (not semantic)", "info",
+    "Retrieval used local hashed vectors plus keywords — this is not semantic search; evidence may be incomplete."],
+  keyword_only_degraded: ["Keyword only (degraded)", "warning",
+    "Retrieval ran in keyword-only degraded mode (semantic search unavailable) — evidence may be incomplete."],
+};
+
+function emptySearch() {
+  return { query: "", vendor_key: "", document_types: [], as_of: "", top_k: "8", include_historical: false };
+}
+
+function validateSearch(f) {
+  const e = {};
+  const q = f.query.trim();
+  if (q.length < 2) e.query = "Enter at least 2 characters to search.";
+  else if (q.length > 500) e.query = "Keep the search under 500 characters.";
+  if (f.vendor_key && !KEY_RE.test(f.vendor_key.trim())) e.vendor_key = "Use lowercase letters, digits, '.', '_' or '-'.";
+  const k = Number(f.top_k);
+  if (!Number.isInteger(k) || k < 1 || k > SEARCH_TOP_K_MAX) e.top_k = `Enter a whole number from 1 to ${SEARCH_TOP_K_MAX}.`;
+  return e;
+}
+
+function SearchSection() {
+  const [f, setF] = useState(emptySearch());
+  const [errors, setErrors] = useState({});
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState(null);
+  const [res, setRes] = useState(null);
+  const set = (k) => (e) => setF((s) => ({ ...s, [k]: e.target.type === "checkbox" ? e.target.checked : e.target.value }));
+  const toggleType = (t) => setF((s) => ({ ...s, document_types: s.document_types.includes(t)
+    ? s.document_types.filter((x) => x !== t) : [...s.document_types, t] }));
+
+  async function submit(e) {
+    e.preventDefault();
+    if (pending) return;
+    const errs = validateSearch(f);
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
+    setPending(true); setError(null); setRes(null);
+    try {
+      setRes(await searchPolicies({ ...f, top_k: Number(f.top_k), as_of: f.as_of || undefined }));
+    } catch (err) {
+      setError(err);
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return (
+    <div className="stack">
+      <form className="stack" onSubmit={submit} noValidate aria-label="Policy search">
+        <p className="muted small">Search the ready policy documents for cited passages. Results are evidence for a person to read — they don't decide anything.</p>
+        <fieldset className="stack" disabled={pending} style={{ border: 0, padding: 0, margin: 0 }}>
+          <div className="field">
+            <label htmlFor="ps-query" className="required">Question or keywords</label>
+            <input id="ps-query" className="input" type="search" maxLength={500} value={f.query} onChange={set("query")}
+              placeholder="insurance requirements for event venues" aria-invalid={Boolean(errors.query)} />
+            {errors.query && <span className="field-error">{errors.query}</span>}
+          </div>
+          <div className="grid-3">
+            <div className="field">
+              <label htmlFor="ps-vendor">Vendor key</label>
+              <input id="ps-vendor" className="input" maxLength={64} value={f.vendor_key} onChange={set("vendor_key")}
+                aria-invalid={Boolean(errors.vendor_key)} />
+              <span className="help">Optional. Limit results to one vendor's documents.</span>
+              {errors.vendor_key && <span className="field-error">{errors.vendor_key}</span>}
+            </div>
+            <div className="field">
+              <label htmlFor="ps-asof">Effective on</label>
+              <input id="ps-asof" type="date" className="input" value={f.as_of} onChange={set("as_of")} />
+              <span className="help">Optional. Only documents in effect on this date.</span>
+            </div>
+            <div className="field">
+              <label htmlFor="ps-topk" className="required">Results</label>
+              <input id="ps-topk" type="number" className="input" min={1} max={SEARCH_TOP_K_MAX} step={1} value={f.top_k}
+                onChange={set("top_k")} aria-invalid={Boolean(errors.top_k)} />
+              {errors.top_k && <span className="field-error">{errors.top_k}</span>}
+            </div>
+          </div>
+          <fieldset className="field" style={{ border: 0, padding: 0, margin: 0 }}>
+            <legend className="label">Document types</legend>
+            <div className="policy-actions">
+              {DOCUMENT_TYPES.map((t) => (
+                <label key={t} className="checkbox">
+                  <input type="checkbox" checked={f.document_types.includes(t)} onChange={() => toggleType(t)} />{humanize(t)}
+                </label>
+              ))}
+            </div>
+            <span className="help">Leave all unchecked to search every type.</span>
+          </fieldset>
+          <label className="checkbox"><input type="checkbox" checked={f.include_historical} onChange={set("include_historical")} />
+            Include superseded and historical versions</label>
+        </fieldset>
+        <InlineError error={error} />
+        <div><button type="submit" className="btn btn-primary" disabled={pending}>{pending ? "Searching…" : "Search"}</button></div>
+      </form>
+      {pending && <LoadingState label="Searching policy documents…" />}
+      {res && <SearchResults res={res} />}
+    </div>
+  );
+}
+
+function SearchResults({ res }) {
+  const mode = res?.retrieval_mode;
+  const [modeLabel, modeTone, modeNote] = RETRIEVAL[mode] || [mode ? humanize(mode) : "Unknown", "neutral", null];
+  const evidence = (Array.isArray(res?.evidence) ? res.evidence : []).filter((e) => e && typeof e === "object");
+  const warnings = Array.isArray(res?.warnings) ? res.warnings : [];
+  const insufficient = Boolean(res?.insufficient_evidence) || evidence.length === 0;
+  const extra = [];
+  if (res?.embedding_provider || res?.embedding_model) {
+    extra.push(`Embeddings: ${res.embedding_provider || "?"}${res.embedding_model ? ` / ${res.embedding_model}` : ""}`);
+  }
+  if (res?.retrieval_config_version) extra.push(`Config ${res.retrieval_config_version}`);
+  return (
+    <section className="card stack" aria-labelledby="ps-results">
+      <div className="row-between">
+        <h2 id="ps-results">Search results</h2>
+        <span className={`badge badge-${modeTone}`} data-testid="retrieval-mode">Retrieval: {modeLabel}</span>
+      </div>
+      {modeNote && <Notice tone={modeTone === "warning" ? "warning" : "info"}>{modeNote}</Notice>}
+      {res?.degradation_reason && <p className="muted small">Reason: {humanize(res.degradation_reason)}</p>}
+      {warnings.map((w, i) => <Notice key={i} tone="warning">{typeof w === "string" ? w : humanize(w?.code || w?.message)}</Notice>)}
+      {insufficient && <Notice tone="warning" title="Insufficient evidence">{INSUFFICIENT}</Notice>}
+      {evidence.length > 0 && (
+        <>
+          <p className="small"><strong>{evidence.length} citation{evidence.length === 1 ? "" : "s"}</strong></p>
+          <ol className="policy-list">
+            {evidence.map((ev, i) => {
+              const score = Number(ev.relevance_score);
+              const meta = [];
+              if (Number.isFinite(score)) meta.push(`Relevance ${score.toFixed(3)}`);
+              if (ev.document_type) meta.push(humanize(ev.document_type));
+              if (ev.vendor_key) meta.push(`Vendor ${ev.vendor_key}`);
+              if (ev.effective_from || ev.effective_to) meta.push(`Effective ${formatDate(ev.effective_from)} – ${formatDate(ev.effective_to)}`);
+              return (
+                <li key={ev.evidence_id || ev.chunk_id || i} className="policy-evidence stack-sm">
+                  <strong>{citationLabel(ev)}</strong>
+                  {ev.excerpt && <blockquote className="untrusted" style={{ margin: 0 }}>{String(ev.excerpt)}</blockquote>}
+                  {meta.length > 0 && <span className="muted small">{meta.join(" · ")}</span>}
+                </li>
+              );
+            })}
+          </ol>
+        </>
+      )}
+      <details className="disclosure">
+        <summary>Search details</summary>
+        <dl className="dl">
+          <dt>Query ID</dt><dd className="mono">{res?.query_id || "—"}</dd>
+          <dt>Retrieval mode</dt><dd className="mono">{mode || "—"}</dd>
+          {extra.map((x) => <Fragment key={x}><dt>Detail</dt><dd>{x}</dd></Fragment>)}
+        </dl>
+      </details>
+    </section>
+  );
+}
+
 // ------------------------------------------------------------------ rate cards (shared with policy review)
 export function RateCardsSection() {
   const [status, setStatus] = useState("needs_review");
@@ -444,6 +653,7 @@ export default function PolicyLibraryPage() {
   const tabs = [
     { id: "documents", label: "Documents" },
     ...(isAdmin ? [{ id: "upload", label: "Upload" }] : []),
+    { id: "search", label: "Search" },
     { id: "rates", label: "Rate cards" },
   ];
   return (
@@ -453,6 +663,7 @@ export default function PolicyLibraryPage() {
       <Tabs tabs={tabs} value={tab} onChange={setTab} label="Policy library sections" />
       {tab === "documents" && <DocumentsSection isAdmin={isAdmin} refreshKey={refreshKey} />}
       {tab === "upload" && isAdmin && <UploadSection onUploaded={() => setRefreshKey((k) => k + 1)} />}
+      {tab === "search" && <SearchSection />}
       {tab === "rates" && <RateCardsSection />}
     </div>
   );

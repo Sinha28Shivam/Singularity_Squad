@@ -933,6 +933,17 @@ def list_comparisons(rfq_id: str, limit: int = 50) -> list[dict]:
                            exc) from exc
 
 
+def get_comparison(rfq_id: str, comparison_id: str) -> Optional[dict]:
+    """A single stored comparison of this RFQ (rows keep their explanatory ``score`` breakdown), or None."""
+    try:
+        coll = _db().vendor_rfq_comparisons
+        doc = coll.find_one({"rfq_id": rfq_id, "comparison_id": comparison_id})
+        return _safe(_repair_doc(coll, "comparison_id", doc)) if doc is not None else None
+    except PyMongoError as exc:
+        raise _persistence("comparison_get", "Database unavailable: comparison could not be loaded.",
+                           exc) from exc
+
+
 def decide_comparison(rfq_id: str, comparison_id: str, body, actor: str,
                       correlation_id: Optional[str] = None) -> dict:
     """Record the human selection. No award, PO or dispatch happens; an accept closes the RFQ if open."""

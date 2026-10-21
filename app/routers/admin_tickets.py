@@ -19,9 +19,11 @@ router = APIRouter(prefix="/api/admin", tags=["admin tickets"])
 
 @router.get("/tickets")
 def all_tickets(status: Optional[TicketStatus] = Query(None), limit: int = Query(100, ge=1, le=200),
+                offset: int = Query(0, ge=0, le=100_000), q: Optional[str] = Query(None, max_length=120),
                 _: UserPublic = Depends(require_admin)):
-    docs, counts = svc.list_admin_tickets(status, limit)
-    return {"tickets": [svc.to_list_item(d, admin=True) for d in docs], "counts": counts}
+    docs, total, next_offset, counts = svc.search_admin_tickets(q, status, limit, offset)
+    return {"tickets": [svc.to_list_item(d, admin=True) for d in docs], "counts": counts,
+            "total": total, "next_offset": next_offset}
 
 
 @router.get("/tickets/{ticket_id}", response_model=AdminTicketView)

@@ -2,7 +2,7 @@
 
 A small, white-first React interface for the existing FastAPI backend (spec: [`Docs/REACT_UI_MIGRATION_AND_DESIGN.md`](../Docs/REACT_UI_MIGRATION_AND_DESIGN.md)).
 The backend stays authoritative for every permission, workflow rule, approval and financial safeguard; the UI only displays server results.
-The Streamlit UI (`ui/`) is still available during the transition.
+This is the project's only UI. The previous Streamlit UI was removed once the React UI reached feature parity (2026-10-21).
 
 ## Run locally
 

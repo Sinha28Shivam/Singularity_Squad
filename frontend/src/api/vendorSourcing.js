@@ -19,6 +19,16 @@ export const CANDIDATE_TRANSITIONS = {
   rejected: [],
   suspended: ["approve"],
 };
+/**
+ * Decisions to offer for a candidate: the server's `allowed_decisions` when the response includes it
+ * (single source of truth), otherwise the local copy of the transition table. The server re-validates.
+ */
+export function allowedDecisions(candidate) {
+  if (candidate && Array.isArray(candidate.allowed_decisions)) {
+    return candidate.allowed_decisions.filter((d) => typeof d === "string");
+  }
+  return CANDIDATE_TRANSITIONS[candidate?.status] || [];
+}
 export const MAX_PDF_BYTES = 5 * 1024 * 1024;
 export const MAX_PDF_PAGES = 20;
 export const MIN_REASON = 5;
@@ -80,6 +90,12 @@ export const downloadQuotePdf = (rfqId, quoteId) =>
 
 // ---------------------------------------------------------------- comparison
 export const compareQuotes = (rfqId) => api.post(`${rfqPath(rfqId)}/compare`, {}, { timeoutMs: 60000 });
+
+/** GET .../comparisons/{id} -> one stored comparison incl. per-row score {total, components, weights, raw}. */
+export const getComparison = (rfqId, comparisonId) => api.get(`${rfqPath(rfqId)}/comparisons/${enc(comparisonId)}`);
+
+/** GET /api/vendor-sourcing/metrics -> {counters: {name: {total, by_label}}, scope, note}. In-process; resets on restart. */
+export const getSourcingMetrics = () => api.get(`${BASE}/metrics`);
 
 export async function listComparisons(rfqId) {
   const data = await api.get(`${rfqPath(rfqId)}/comparisons`);
