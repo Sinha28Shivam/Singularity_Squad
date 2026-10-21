@@ -95,7 +95,14 @@ async def submit_pdf_quote(rfq_id: str, request: Request,
     if content_type != "application/pdf":
         raise HTTPException(415, "Content-Type must be application/pdf.")
     try:
-        raw = await request.body()
+        chunks = []
+        total = 0
+        async for chunk in request.stream():
+            total += len(chunk)
+            if total > rfq_service.MAX_PDF_BYTES:
+                raise HTTPException(413, "PDF exceeds the 5 MiB upload limit.")
+            chunks.append(chunk)
+        raw = b"".join(chunks)
         return rfq_service.submit_pdf_quote(rfq_id, vendor_id, quote_reference, filename, raw, admin.username)
     except LookupError as exc:
         raise HTTPException(404, str(exc)) from exc
