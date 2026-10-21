@@ -32,6 +32,8 @@ def search_vendors(q: str = Query("", max_length=120),
 def create_candidate(body: CandidateIn, admin: UserPublic = Depends(require_admin)):
     try:
         return service.submit_candidate(body, admin.username)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
     except PersistenceError as exc:
         raise HTTPException(503, "Vendor registry temporarily unavailable.") from exc
 
