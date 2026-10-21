@@ -95,6 +95,9 @@ def create_rfq(body, actor: str) -> dict:
                          + ", ".join(ineligible))
     now = _now()
     doc = body.model_dump(mode="python")
+    doc["quantity"] = str(body.quantity)
+    doc["budget_limit"] = str(body.budget_limit)
+    doc["delivery_date"] = body.delivery_date.isoformat()
     doc.update({
         "rfq_id": _id("RFQ"), "status": "open", "created_by": actor,
         "created_at": now, "updated_at": now, "quotes_received": 0,
@@ -157,6 +160,9 @@ def submit_structured_quote(rfq_id: str, body, actor: str) -> dict:
         raise ValueError("Vendor is not currently approved.")
     now = _now()
     doc = body.model_dump(mode="python")
+    for money_field in ("unit_price", "tax_amount", "delivery_fee", "other_fees"):
+        doc[money_field] = str(doc[money_field])
+    doc["delivery_date"] = body.delivery_date.isoformat()
     doc.update({
         "quote_id": _id("QUOTE"), "rfq_id": rfq_id, "submission_type": "structured",
         "status": "pending_verification", "currency": rfq["currency"], "quantity": rfq["quantity"],
@@ -221,6 +227,9 @@ def verify_quote(rfq_id: str, quote_id: str, body, actor: str) -> dict:
             raise LookupError("RFQ not found.")
         now = _now()
         fields = body.model_dump(mode="python")
+        for money_field in ("unit_price", "tax_amount", "delivery_fee", "other_fees"):
+            fields[money_field] = str(fields[money_field])
+        fields["delivery_date"] = body.delivery_date.isoformat()
         fields.update({"status": "verified", "verified_by": actor, "verified_at": now,
                        "reviewer_note": body.reviewer_note})
         updated = coll.find_one_and_update({"rfq_id": rfq_id, "quote_id": quote_id,
@@ -261,7 +270,10 @@ def compare_quotes(rfq_id: str, actor: str) -> dict:
                  + Decimal(str(quote.get("delivery_fee") or 0))
                  + Decimal(str(quote.get("other_fees") or 0))
         )
-        delivery_ok = quote["delivery_date"] <= rfq["delivery_date"]
+        from datetime import date as date_type
+        quote_delivery = date_type.fromisoformat(str(quote["delivery_date"])[:10])
+        required_delivery = date_type.fromisoformat(str(rfq["delivery_date"])[:10])
+        delivery_ok = quote_delivery <= required_delivery
         warranty_ok = int(quote["warranty_months"]) >= required_warranty
         compliance = quote.get("compliance") or {}
         missing_compliance = [req for req in required_compliance if compliance.get(req) is not True]
@@ -276,7 +288,7 @@ def compare_quotes(rfq_id: str, actor: str) -> dict:
             "currency": rfq["currency"], "unit_price": str(quote["unit_price"]),
             "quantity": str(quantity), "tax_amount": str(quote.get("tax_amount") or 0),
             "delivery_fee": str(quote.get("delivery_fee") or 0), "other_fees": str(quote.get("other_fees") or 0),
-            "total_cost": str(total.quantize(Decimal("0.01"))), "delivery_date": quote["delivery_date"].isoformat(),
+            "total_cost": str(total.quantize(Decimal("0.01"))), "delivery_date": quote_delivery.isoformat(),
             "delivery_compliant": delivery_ok, "warranty_months": quote["warranty_months"],
             "warranty_compliant": warranty_ok, "compliance": compliance,
             "missing_compliance": missing_compliance, "eligible": eligible,
