@@ -156,11 +156,33 @@ def preferred_provider() -> tuple[str, str]:
     return provider_for_model(model), model
 
 
+def index_metadata(model: Optional[str], vectors: Optional[list[list[float]]]) -> dict:
+    """Embedding/index metadata stored with every chunk: provider, exact model id and vector dimensions."""
+    dims = len(vectors[0]) if vectors and vectors[0] is not None else None
+    return {"embedding_model": model if vectors else None,
+            "embedding_provider": provider_for_model(model) if vectors else "none",
+            "embedding_dims": dims}
+
+
+def index_key(chunk: dict) -> Optional[tuple[str, int]]:
+    """(model, dims) of a stored chunk vector; None when the chunk has no usable vector."""
+    vec, model = chunk.get("embedding"), chunk.get("embedding_model")
+    if not vec or not model:
+        return None
+    return str(model), int(chunk.get("embedding_dims") or len(vec))
+
+
 def retrieval_config_version(extra: Optional[dict] = None) -> str:
-    """Stable id of the retrieval configuration (weights, thresholds, embedding settings)."""
+    """Stable id of the retrieval configuration (weights, thresholds, embedding, tokenizer and chunking)."""
+    from app.policy_rag import chunking, tokenization  # local import: chunking imports schemas only
+
     cfg = load_config()
-    keys = ("min_relevance", "retrieval_top_k", "embedding_model", "chunk_target_tokens", "chunk_overlap_tokens")
+    keys = ("min_relevance", "retrieval_top_k", "embedding_model", "chunk_target_tokens", "chunk_overlap_tokens",
+            "chunk_max_tokens")
     data = {k: cfg.get(k) for k in keys}
+    counter = tokenization.get_token_counter()
+    data["tokenizer_id"] = counter.tokenizer_id
+    data["chunking_config_version"] = chunking.current_chunking_config_version(cfg, counter)
     data.update(extra or {})
     payload = json.dumps(data, sort_keys=True, default=str)
     return "rcfg-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]

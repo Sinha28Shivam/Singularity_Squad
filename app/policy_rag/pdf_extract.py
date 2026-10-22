@@ -45,6 +45,38 @@ class PageText:
     char_count: int = field(default=0)
 
 
+def extraction_tool() -> dict:
+    """Extraction tool and version recorded with each document (plan C5)."""
+    try:
+        import pypdf
+        version = getattr(pypdf, "__version__", None)
+    except ImportError:  # pragma: no cover - dependency is pinned
+        version = None
+    return {"tool": "pypdf", "tool_version": version, "ocr": None}
+
+
+def extraction_quality(pages: list[PageText], *, low_text_chars: int = DEFAULT_LOW_TEXT_CHARS,
+                       review_ratio: float = 0.30) -> dict:
+    """Page-level quality metadata. Contains page numbers and counts only, never text."""
+    low = [p.page_number for p in pages if p.low_text]
+    empty = [p.page_number for p in pages if p.char_count == 0]
+    total = len(pages)
+    ratio = round(len(low) / total, 4) if total else 0.0
+    warnings = []
+    if empty:
+        warnings.append("pages_without_text")  # likely scanned/image-only; OCR is not configured
+    if low:
+        warnings.append("low_text_pages")
+    if total and ratio > review_ratio:
+        warnings.append("low_text_ratio_exceeds_review_threshold")
+    return {**extraction_tool(), "page_count": total, "low_text_chars_per_page": int(low_text_chars),
+            "low_text_page_count": len(low), "low_text_ratio": ratio, "low_text_pages": low,
+            "empty_text_pages": empty, "total_chars": sum(p.char_count for p in pages),
+            "quality": "complete" if not low else ("failed" if total and len(empty) == total else "partial"),
+            "needs_review": total == 0 or ratio > review_ratio,
+            "warnings": warnings}
+
+
 def has_pdf_signature(data: bytes) -> bool:
     # The spec allows leading junk before the header within the first 1024 bytes; accept a little slack.
     return bool(data) and PDF_MAGIC in data[:1024]

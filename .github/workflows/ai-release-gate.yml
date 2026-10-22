@@ -1,0 +1,36 @@
+name: AI release gate
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  ai-release-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WORKPLACEOPS_OFFLINE: "1"
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        # numpy is used by app/policy_rag/embeddings.py; mongomock is in requirements.txt (test-only).
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt numpy mongomock
+      - name: Run AI release gate
+        run: python scripts/ai_release_gate.py
+      - name: Upload release report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-release-report
+          path: data/eval/reports/
+          if-no-files-found: warn

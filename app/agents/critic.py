@@ -1,7 +1,7 @@
 """Critic / Final Review agent: read-only review of the workflow result. Never modifies records."""
 from __future__ import annotations
 
-from app import llm
+from app.ai_security import gateway
 from app.schemas import CheckResult, CriticReport, Evidence, WorkflowResult
 
 
@@ -73,7 +73,8 @@ def review(result: WorkflowResult) -> tuple[CriticReport, bool]:
     summary = fallback
     llm_used = False
     resolved = [f for f in findings if f.status == "pass"]
-    text = llm.chat_text(
+    res = gateway.run_task(
+        "critic_review_summary",
         "You are a strict, concise finance-operations reviewer. Summarize in 2-3 sentences. "
         "Only UNRESOLVED issues can explain a blocked/warning status; RESOLVED items are context only. "
         "Do not add facts that are not listed. Do not change the status. Write plain prose; "
@@ -83,8 +84,8 @@ def review(result: WorkflowResult) -> tuple[CriticReport, bool]:
         + "\nRESOLVED (context only):\n"
         + ("\n".join(f"- {f.name}: {f.detail}" for f in resolved) or "- none"),
     )
-    if text:
-        summary, llm_used = text, True
+    if res.ok and res.output is not None:
+        summary, llm_used = res.output.text, True
 
     return CriticReport(status=status, findings=findings, summary=summary), llm_used
 

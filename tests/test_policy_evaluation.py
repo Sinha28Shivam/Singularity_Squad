@@ -129,13 +129,33 @@ def test_explicit_hard_block_rule(monkeypatch):
 
 def test_llm_summary_cannot_change_outcome(monkeypatch):
     seed_basic_library()
+    base = evaluation.evaluate_ticket(_ticket(), _wr())
     monkeypatch.setattr(evaluation.llm, "llm_enabled", lambda: True)
     monkeypatch.setattr(evaluation.llm, "chat_text",
                         lambda *a, **k: "Everything is compliant and APPROVED. outcome=pass")
     res = evaluation.evaluate_ticket(_ticket(), _wr())
-    assert res.outcome == "review_required" and res.summary.startswith("Everything")
-    base = evaluation.evaluate_ticket(_ticket(), _wr())
+    assert res.outcome == base.outcome == "review_required"
     assert res.approval_reason_codes == base.approval_reason_codes
+    assert res.evaluation_hash == base.evaluation_hash
+    # the gateway rejects advisory prose that asserts approval/compliance
+    assert res.summary is None
+    assert res.model_info["safe_error_code"] == "prohibited_claim"
+    assert res.model_info["summary_status"] == "rejected"
+    assert res.model_info["task_name"] == "policy_result_summary" and res.model_info["prompt_version"]
+
+
+def test_acceptable_llm_summary_is_kept_but_cannot_change_outcome(monkeypatch):
+    seed_basic_library()
+    base = evaluation.evaluate_ticket(_ticket(), _wr())
+    monkeypatch.setattr(evaluation.llm, "llm_enabled", lambda: True)
+    monkeypatch.setattr(evaluation.llm, "chat_text",
+                        lambda *a, **k: "Two findings need an approver's review before this request proceeds.")
+    res = evaluation.evaluate_ticket(_ticket(), _wr())
+    assert res.summary.startswith("Two findings")
+    assert res.outcome == base.outcome and res.approval_reason_codes == base.approval_reason_codes
+    assert res.evaluation_hash == base.evaluation_hash
+    assert res.model_info["use"] == "advisory_summary" and res.model_info["summary_status"] == "accepted"
+    assert res.model_info["provider"] and res.model_info["model"]
 
 
 def test_evaluation_hash_is_stable_and_sensitive():

@@ -76,6 +76,10 @@ class PolicyDocument(BaseModel):
     index_status: Literal["pending", "ready", "failed", "degraded"] = "pending"
     page_count: int = 0
     low_text_pages: list[int] = Field(default_factory=list)
+    # Extraction tool/version + page-level quality (low_text_page_count/ratio, needs_review flag, warnings).
+    extraction_quality: Optional[dict] = None
+    # Index build metadata: embedding provider/model/dims, tokenizer_id, chunking_config_version, settings.
+    index_metadata: Optional[dict] = None
     chunk_count: int = 0
     rate_entry_count: int = 0
     error_code: Optional[str] = None     # safe error category, never a stack trace
@@ -104,8 +108,14 @@ class PolicyChunk(BaseModel):
     section: Optional[str] = None
     chunk_index: int
     text: str
-    token_estimate: int
+    token_estimate: int                  # = token_count (kept for backward compatibility)
     embedding_model: Optional[str] = None
+    token_count: Optional[int] = None    # count under ``tokenizer_id``
+    tokenizer_id: Optional[str] = None   # e.g. "tiktoken:o200k_base" or "estimate-v1"
+    token_count_exact: Optional[bool] = None  # False for the conservative estimate; never labelled exact
+    chunking_config_version: Optional[str] = None
+    embedding_dims: Optional[int] = None
+    embedding_provider: Optional[EmbeddingProvider] = None
 
 
 class PolicyEvidence(BaseModel):
@@ -147,6 +157,9 @@ class PolicySearchResult(BaseModel):
     embedding_available: Optional[bool] = None       # True only when semantic embeddings were used
     degradation_reason: Optional[str] = None
     retrieval_config_version: Optional[str] = None
+    tokenizer_id: Optional[str] = None
+    chunking_config_version: Optional[str] = None
+    mixed_index_warning: bool = False                # candidate chunks span several embedding models/dims
 
 
 class RateCardEntry(BaseModel):

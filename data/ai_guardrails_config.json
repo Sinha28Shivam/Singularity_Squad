@@ -1,0 +1,20 @@
+{
+  "config_version": "ai-guardrails-v1",
+  "model_context_tokens": 128000,
+  "token_budget": {
+    "safety_margin_tokens": 512,
+    "max_input_tokens": 12000,
+    "max_output_tokens": 1200,
+    "max_evidence_items": 8,
+    "max_evidence_excerpt_chars": 1200,
+    "on_overflow": "reduce_evidence_then_review"
+  },
+  "telemetry": {
+    "max_events": 2000
+  },
+  "cost_rates": {
+    "rates_version": "unset",
+    "currency": "USD",
+    "per_million_tokens": {}
+  }
+}
