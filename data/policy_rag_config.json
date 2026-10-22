@@ -7,6 +7,7 @@
   "low_text_chars_per_page": 80,
   "chunk_target_tokens": 450,
   "chunk_overlap_tokens": 60,
+  "chunk_max_tokens": 512,
   "embedding_model": "text-embedding-3-small",
   "require_verified_rate_cards": true,
   "rate_tolerance_inr": "1.00",

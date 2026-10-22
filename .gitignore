@@ -9,3 +9,4 @@ venv/
 data/policy_store/
 .p3_acceptance_scratch/
 data/vendor_quote_store/
+data/eval/reports/

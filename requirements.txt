@@ -8,3 +8,4 @@ httpx>=0.27
 pymongo>=4.6
 mongomock>=4.1  # test-only in-memory MongoDB
 pypdf>=4.2
+tiktoken>=0.7  # optional: exact token counts; falls back to a conservative estimate if missing

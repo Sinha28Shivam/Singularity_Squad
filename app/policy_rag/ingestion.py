@@ -21,9 +21,11 @@ from typing import Any, Iterable, Optional
 from app.data_loader import DATA_DIR, load_json
 from app.db.errors import PersistenceError
 from app.policy_rag import events, storage
-from app.policy_rag.chunking import chunk_pages
+from app.policy_rag.chunking import chunk_pages, chunking_settings, current_chunking_config_version
 from app.policy_rag.errors import PolicyRagError
-from app.policy_rag.pdf_extract import ERROR_MESSAGES, PageText, PdfError, extract_pages, has_pdf_signature
+from app.policy_rag.pdf_extract import (ERROR_MESSAGES, PageText, PdfError, extract_pages, extraction_quality,
+                                        has_pdf_signature)
+from app.policy_rag.tokenization import get_token_counter
 from app.policy_rag.schemas import DocumentUploadResult, PolicyDocument, PolicyDocumentMetadataIn
 from app.repositories import policy_chunk_repository as chunk_repo
 from app.repositories import policy_document_repository as doc_repo
@@ -114,6 +116,21 @@ def _embed(texts: list[str]) -> tuple[Optional[list[list[float]]], Optional[str]
     return vectors, str(model)
 
 
+def _index_meta(model: Optional[str], vectors: Optional[list[list[float]]]) -> dict:
+    try:
+        from app.policy_rag.embeddings import index_metadata
+        return index_metadata(model, vectors)
+    except ImportError:  # pragma: no cover
+        return {"embedding_model": model if vectors else None, "embedding_provider": "none",
+                "embedding_dims": len(vectors[0]) if vectors else None}
+
+
+def _quality(pages: list[PageText], cfg: Optional[dict] = None) -> dict:
+    cfg = cfg or config()
+    return extraction_quality(pages, low_text_chars=int(cfg.get("low_text_chars_per_page", 80)),
+                              review_ratio=LOW_TEXT_REVIEW_RATIO)
+
+
 def _extract_rate_entries(document: PolicyDocument, pages: list[PageText]) -> Optional[int]:
     """Returns the number of rate rows created, or None when the rate-card module is unavailable."""
     try:
@@ -130,12 +147,15 @@ def _index_document(doc: dict, pages: list[PageText], actor: str) -> dict:
     cfg = config()
     model = doc_repo.to_model(doc)
     document_id = model.document_id
-    chunks = chunk_pages(pages, model, target_tokens=int(cfg.get("chunk_target_tokens", 450)),
-                         overlap_tokens=int(cfg.get("chunk_overlap_tokens", 60)))
+    settings = chunking_settings(cfg)
+    chunks = chunk_pages(pages, model, **settings)
     vectors, embedding_model = _embed([c.text for c in chunks])
+    index_meta = _index_meta(embedding_model, vectors)
     if vectors is not None:
         for c in chunks:
             c.embedding_model = embedding_model
+            c.embedding_provider = index_meta["embedding_provider"]
+            c.embedding_dims = index_meta["embedding_dims"]
     chunk_repo.replace_chunks(document_id, chunks, embeddings=vectors, document_type=model.document_type,
                               vendor_key=model.vendor_key, document_status="indexing")
     index_status = "ready" if vectors is not None else "degraded"
@@ -167,9 +187,19 @@ def _index_document(doc: dict, pages: list[PageText], actor: str) -> dict:
         status = "superseded"  # reprocessing a historical version keeps it historical
     else:
         status = "needs_review" if needs_review else "ready"
+    quality = _quality(pages, cfg)
+    first = chunks[0] if chunks else None
     fields = {"status": status, "index_status": index_status, "chunk_count": len(chunks),
               "rate_entry_count": rate_count, "extraction_status": "partial" if low else "complete",
-              "low_text_pages": low, "page_count": len(pages), "error_code": None}
+              "low_text_pages": low, "page_count": len(pages), "error_code": None,
+              "extraction_quality": quality,
+              "index_metadata": {**index_meta,
+                                 "tokenizer_id": first.tokenizer_id if first else None,
+                                 "token_count_exact": first.token_count_exact if first else None,
+                                 "chunking_config_version": (first.chunking_config_version if first else
+                                                             current_chunking_config_version(cfg)),
+                                 "max_chunk_tokens": max((c.token_count or 0) for c in chunks) if chunks else 0,
+                                 **settings}}
     updated = doc_repo.update_document(document_id, fields) or {**doc, **fields}
     chunk_repo.set_document_status(document_id, status)
     if status == "needs_review":
@@ -274,7 +304,8 @@ def ingest_bytes(data: bytes, filename: str, meta: PolicyDocumentMetadataIn, upl
 
     if empty_text:
         doc = doc_repo.update_document(document_id, {"status": "needs_ocr", "extraction_status": "failed",
-                                                     "index_status": "failed", "error_code": "empty_text"}) or doc
+                                                     "index_status": "failed", "error_code": "empty_text",
+                                                     "extraction_quality": _quality(pages, cfg)}) or doc
         events.record_safely("document_marked_needs_review", actor, document_id=document_id, reason="empty_text")
         return DocumentUploadResult(filename=safe_name, ok=True, document_id=document_id, status="needs_ocr",
                                     error_code="empty_text", message=ERROR_MESSAGES["empty_text"])
@@ -342,7 +373,10 @@ def reprocess(document_id: str, actor: str) -> DocumentUploadResult:
                               low_text_chars=int(cfg.get("low_text_chars_per_page", 80)))
     except PdfError as exc:
         status = "needs_ocr" if exc.code == "empty_text" else "failed"
-        doc_repo.update_document(document_id, {"status": status, "error_code": exc.code})
+        fields = {"status": status, "error_code": exc.code}
+        if exc.code == "empty_text":
+            fields["extraction_quality"] = _quality(getattr(exc, "pages", []), cfg)
+        doc_repo.update_document(document_id, fields)
         chunk_repo.delete_chunks(document_id)
         return DocumentUploadResult(filename=filename, ok=status != "failed", document_id=document_id,
                                     status=status, error_code=exc.code, message=ERROR_MESSAGES.get(exc.code))
@@ -361,6 +395,33 @@ def reprocess(document_id: str, actor: str) -> DocumentUploadResult:
         return _failed(filename, "processing_error", document_id)
     _supersede_previous(doc, actor)
     return DocumentUploadResult(filename=filename, ok=True, document_id=document_id, status=doc["status"])
+
+
+def current_index_signature() -> dict:
+    """Tokenizer and chunking configuration a fresh index build would use now."""
+    cfg = config()
+    counter = get_token_counter()
+    return {"tokenizer_id": counter.tokenizer_id, "token_count_exact": bool(counter.exact),
+            "chunking_config_version": current_chunking_config_version(cfg, counter), **chunking_settings(cfg)}
+
+
+def documents_needing_reindex(*, embedding_model: Optional[str] = None) -> list[str]:
+    """Ids of non-archived documents whose chunks were built with a different chunking config or tokenizer
+    (or, when given, a different embedding model). Re-index them with ``reindex_document``."""
+    sig = current_index_signature()
+    return chunk_repo.stale_chunk_documents(sig["chunking_config_version"], sig["tokenizer_id"],
+                                            embedding_model=embedding_model)
+
+
+def reindex_document(document_id: str, actor: str = "system") -> DocumentUploadResult:
+    """Controlled re-index of one document from its stored PDF (re-extract, re-chunk, re-embed). Deterministic
+    for a fixed file and configuration: chunk ids depend only on document id, content hash and position."""
+    return reprocess(document_id, actor)
+
+
+def reindex_stale_documents(actor: str = "system", *, embedding_model: Optional[str] = None
+                            ) -> list[DocumentUploadResult]:
+    return [reindex_document(d, actor) for d in documents_needing_reindex(embedding_model=embedding_model)]
 
 
 def archive(document_id: str, actor: str) -> dict:

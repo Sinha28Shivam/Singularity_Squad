@@ -12,6 +12,7 @@ import hashlib
 import math
 import re
 import secrets
+import time
 from collections import Counter
 from typing import Any, Optional
 
@@ -30,6 +31,8 @@ DEGRADED_WARNING = ("Semantic (vector) retrieval is unavailable; results use key
                     "(degraded mode). Absence of evidence is not evidence of compliance.")
 LOCAL_HASH_WARNING = ("Vectors come from the local hashed fallback, not a semantic embedding model; retrieval "
                       "is degraded (hybrid_local_hash). Absence of evidence is not evidence of compliance.")
+MIXED_INDEX_WARNING = ("The policy index mixes embedding models or vector dimensions; only vectors matching the "
+                       "query embedder are compared, other chunks are ranked by keywords only. Re-index to fix.")
 DEGRADED_MODES = {"hybrid_local_hash", "keyword_only_degraded"}
 
 
@@ -37,12 +40,33 @@ def _config_version() -> str:
     return emb.retrieval_config_version({"rrf_k": RRF_K, "kw_weight": KEYWORD_WEIGHT, "vec_weight": VECTOR_WEIGHT})
 
 
-def _mode_metadata(mode: str, model: Optional[str], reason: Optional[str]) -> dict:
+def _mode_metadata(mode: str, model: Optional[str], reason: Optional[str], mixed_index: bool = False) -> dict:
+    from app.policy_rag import chunking, tokenization
+
+    counter = tokenization.get_token_counter()
     return {"embedding_provider": emb.provider_for_model(model) if mode != "keyword_only_degraded" else "none",
             "embedding_model": model if mode != "keyword_only_degraded" else None,
             "embedding_available": mode == "hybrid",
-            "degradation_reason": None if mode == "hybrid" else reason,
-            "retrieval_config_version": _config_version()}
+            "degradation_reason": None if mode == "hybrid" and not mixed_index else reason,
+            "retrieval_config_version": _config_version(),
+            "tokenizer_id": counter.tokenizer_id,
+            "chunking_config_version": chunking.current_chunking_config_version(emb.load_config(), counter),
+            "mixed_index_warning": bool(mixed_index)}
+
+
+def _record_telemetry(result: PolicySearchResult, started: float) -> None:
+    """Safe per-search telemetry: operational metadata only, never the query or document text."""
+    try:
+        from app.ai_security import telemetry
+        telemetry.record({"kind": "retrieval", "retrieval_mode": result.retrieval_mode,
+                          "degradation_reason": result.degradation_reason, "result_count": len(result.evidence),
+                          "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+                          "insufficient_evidence": result.insufficient_evidence,
+                          "retrieval_config_version": result.retrieval_config_version,
+                          "embedding_model": result.embedding_model, "tokenizer_id": result.tokenizer_id,
+                          "mixed_index_warning": result.mixed_index_warning})
+    except Exception:  # noqa: BLE001 - telemetry must never break retrieval
+        pass
 _STOPWORDS = frozenset("""a an and are as at be been by can do does for from has have how i if in into is it its
 may must not of on or our per should so such than that the their them then there these they this those to
 under up was we were what when where which who will with within without you your any all also only""".split())
@@ -157,6 +181,13 @@ def _coverage(query_terms: list[str], terms: list[str], idf: dict[str, float], n
 def search(params: PolicySearchIn, viewer=None, *, min_relevance: Optional[float] = None) -> PolicySearchResult:
     """Retrieve applicable evidence. ``viewer=None`` is the trusted system (policy evaluation)."""
     _check_viewer(viewer)
+    started = time.perf_counter()
+    result = _search(params, min_relevance)
+    _record_telemetry(result, started)
+    return result
+
+
+def _search(params: PolicySearchIn, min_relevance: Optional[float]) -> PolicySearchResult:
     from app.repositories import policy_chunk_repository as chunk_repo
 
     cfg = emb.load_config()
@@ -189,28 +220,37 @@ def search(params: PolicySearchIn, viewer=None, *, min_relevance: Optional[float
     kw_scores, idf = _bm25(q_terms, docs_terms)
     coverage = [_coverage(q_terms, t, idf, len(chunks)) for t in docs_terms]
 
-    # Vector scores: only comparable with chunks embedded by the same model as the query.
-    models = Counter(c.get("embedding_model") for c in chunks if c.get("embedding") and c.get("embedding_model"))
+    # Vector scores: only comparable with chunks embedded by the same model AND dimension as the query vector.
+    index_keys = [emb.index_key(c) for c in chunks]
+    keys = Counter(k for k in index_keys if k is not None)
+    mixed_index = len(keys) > 1
     vec_scores: list[Optional[float]] = [None] * len(chunks)
     mode = "keyword_only_degraded"
     model: Optional[str] = None
     reason = "no_stored_embeddings"
     vectors_used = False
-    if models:
-        model = models.most_common(1)[0][0]
+    if keys:
+        # Deterministic choice: most chunks first, then model name / dims.
+        (model, dims), _n = sorted(keys.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))[0]
         embedder = emb.embedder_for_model(model)
         qv = embedder.embed([params.query]) if embedder is not None else None
-        if qv:
+        if qv and len(qv[0]) == dims:
             vectors_used = True
             mode = "hybrid" if emb.provider_for_model(model) == "openai" else "hybrid_local_hash"
             reason = "local_hash_embeddings_not_semantic"
             for i, c in enumerate(chunks):
-                if c.get("embedding_model") == model and c.get("embedding"):
+                if index_keys[i] == (model, dims) and len(c["embedding"]) == dims:
                     vec_scores[i] = emb.cosine(qv[0], c["embedding"])
-            if sum(models.values()) < len(chunks) or len(models) > 1:
+            if sum(keys.values()) < len(chunks) or mixed_index:
                 warnings.append("Some chunks have no comparable embedding; they are ranked by keywords only.")
+        elif qv:
+            reason = "query_embedding_dimension_mismatch"
         else:
             reason = "embedding_provider_unavailable"
+    if mixed_index:
+        warnings.append(MIXED_INDEX_WARNING)
+        if mode == "hybrid":
+            reason = "mixed_embedding_index"  # semantic, but part of the library is keyword-only for now
     if mode == "keyword_only_degraded":
         warnings.append(DEGRADED_WARNING)
     elif mode == "hybrid_local_hash":
@@ -261,4 +301,4 @@ def search(params: PolicySearchIn, viewer=None, *, min_relevance: Optional[float
         warnings.append("No sufficiently relevant policy evidence was found.")
     return PolicySearchResult(query_id=query_id, evidence=evidence, retrieval_mode=mode,
                               insufficient_evidence=insufficient, warnings=warnings,
-                              **_mode_metadata(mode, model, reason))
+                              **_mode_metadata(mode, model, reason, mixed_index))

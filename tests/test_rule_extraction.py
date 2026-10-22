@@ -156,7 +156,7 @@ def test_unknown_document_is_404():
 def _fake_llm(monkeypatch, response, captured=None):
     monkeypatch.setattr(llm, "llm_enabled", lambda: True)
 
-    def chat_json(system, user):
+    def chat_json(system, user, **kwargs):
         if captured is not None:
             captured.update({"system": system, "user": user})
         return response(json.loads(user)) if callable(response) else response

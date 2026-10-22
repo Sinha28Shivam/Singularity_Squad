@@ -26,6 +26,7 @@ from app.db import PersistenceError, close_client, ensure_indexes, persistence_m
 from app.db.mongo import db_status
 from app.repositories import get_audit_entries, get_ticket, list_recent_tickets
 from app.routers import admin_tickets as admin_tickets_router
+from app.routers import ai_ops as ai_ops_router
 from app.routers import approvals as approvals_router
 from app.routers import auth as auth_router
 from app.routers import my_tickets as my_tickets_router
@@ -149,6 +150,7 @@ async def _approval_error_handler(_: Request, exc: ApprovalError):
 
 app.include_router(my_tickets_router.router)
 app.include_router(admin_tickets_router.router)
+app.include_router(ai_ops_router.router)
 # Registered before the legacy /api/tickets/{ticket_id} routes; only /api/tickets/{id}/approval is opened
 # to owners/approvers, the legacy ticket routes stay admin-only.
 app.include_router(approvals_router.router)

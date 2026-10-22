@@ -75,6 +75,12 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 | too_soon | — | blocked. Lead time < 5 business days (EVT-2.2) |
 | missing_info | — | needs_clarification |
 
+## AI guardrails & evaluation
+- Plan: [Docs/AI_Guardrails_Tokenization_RAG_Enhancement_Plan.md](Docs/AI_Guardrails_Tokenization_RAG_Enhancement_Plan.md). Runbooks and alert catalogue: [Docs/AI_GUARDRAILS_RUNBOOK.md](Docs/AI_GUARDRAILS_RUNBOOK.md).
+- Offline RAG benchmark (synthetic corpus, draft dataset `rag-bench-v1`, domain-owner review pending; see [data/eval/README.md](data/eval/README.md)): `python scripts/run_rag_benchmark.py [--baseline data/eval/baseline_rag_bench_v1.json]`. It reports Recall/Precision/MRR/nDCG@k, citation validity, answerability, scope violations and degraded-mode rate.
+- Release gate: `python scripts/ai_release_gate.py` runs the security/invariant test suites, the benchmark against the measured baseline and a secret scan. It writes `data/eval/reports/release_report.json`, and CI runs it via `.github/workflows/ai-release-gate.yml`.
+- Admin-only AI ops endpoints: `GET /api/admin/ai/telemetry/summary`, `GET /api/admin/ai/telemetry/events?limit=1..200` and `GET /api/admin/ai/tasks`. Telemetry is redacted and ephemeral (in-process). The durable copy is the `ai_event` log line on logger `workplaceops.ai_telemetry`.
+
 ## Layout
 - `frontend/`: the React UI (Vite + React + React Router + lucide-react + plain CSS). It is a white-first, minimal design that uses only the existing FastAPI APIs; see `frontend/README.md` and `Docs/REACT_UI_MIGRATION_AND_DESIGN.md`.
 - `app/agents/`: one module per agent.
