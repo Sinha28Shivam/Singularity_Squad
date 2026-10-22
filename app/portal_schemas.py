@@ -136,6 +136,26 @@ class Decision(BaseModel):
     note: Optional[str] = None
 
 
+class TimelineEvent(BaseModel):
+    sequence: int
+    actor: str
+    action: str
+    status: str
+    summary: str
+    timestamp: dt.datetime
+    evidence_refs: list[str] = Field(default_factory=list)
+
+
+class PendingAction(BaseModel):
+    required: bool
+    owner: str
+    code: str
+    label: str
+    reason: Optional[str] = None
+    blocked: bool = False
+    blocked_reason: Optional[str] = None
+
+
 # ---------- views ----------
 class TicketListItem(BaseModel):
     ticket_id: str
@@ -164,6 +184,8 @@ class UserTicketView(BaseModel):
     approval: Optional[dict] = None                # requester-safe approval summary (Phase 2)
     policy_evidence: Optional[dict] = None         # redacted policy findings + citation labels (Policy RAG)
     policy_status: Optional[dict] = None           # {needs_clarification, blocked, reasons} (both may be true)
+    timeline: list[TimelineEvent] = Field(default_factory=list)
+    pending_action: PendingAction
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None
 
@@ -187,5 +209,7 @@ class AdminTicketView(BaseModel):
     policy_evaluation: Optional[dict] = None       # latest policy evaluation snapshot (Policy RAG)
     policy_status: Optional[dict] = None           # server-derived requirement flags (clarification AND block)
     invoice_match: Optional[dict] = None           # invoice matched after approval (payments simulation)
+    timeline: list[TimelineEvent] = Field(default_factory=list)
+    pending_action: PendingAction
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None

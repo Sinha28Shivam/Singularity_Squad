@@ -8,6 +8,7 @@ import {
   ApprovalPanel, DRAFT_PO_NOTE, NotesList, PolicyEvidence, SubmissionDetails,
 } from "../components/WorkflowResult";
 import { RequestForm } from "./NewRequestPage";
+import WorkflowTimeline, { PendingActionBanner } from "../components/WorkflowTimeline";
 import { useApi } from "../lib/useApi";
 import { formatDateTime, formatMoney, humanize } from "../lib/format";
 import {
@@ -103,6 +104,8 @@ export default function RequestDetailPage() {
 
       {flash && <Notice tone="success" role="status">{flash}</Notice>}
 
+      <PendingActionBanner action={view.pending_action} />
+
       <section className="card req-section" aria-labelledby="rd-status">
         <h2 id="rd-status" className="sr-only">Status</h2>
         <div className="req-summary">
@@ -114,6 +117,8 @@ export default function RequestDetailPage() {
         {view.outcome && <p data-testid="outcome">{view.outcome}</p>}
         <p className="small"><strong>Next:</strong> {userNextAction(status)}</p>
       </section>
+
+      <WorkflowTimeline events={view.timeline} />
 
       {questions.length > 0 && (
         <section className="card req-section" aria-labelledby="rd-questions">

@@ -30,9 +30,11 @@ from app.portal_schemas import (
     USER_EDITABLE_STATUSES,
     AdminTicketView,
     Decision,
+    PendingAction,
     TicketListItem,
     TicketNote,
     TicketSubmission,
+    TimelineEvent,
     UserPublic,
     UserTicketView,
 )
@@ -41,6 +43,7 @@ from app.repositories import (
     count_tickets_by_status,
     create_submitted_ticket,
     create_ticket,
+    get_audit_entries,
     get_last_sequence,
     get_ticket,
     list_tickets,
@@ -716,6 +719,65 @@ def _requester_policy_status(status: Optional[dict]) -> Optional[dict]:
     return {k: status.get(k) for k in ("needs_clarification", "blocked", "reasons")}
 
 
+_PENDING_ACTIONS = {
+    "submitted": ("admin", "run_workflow", "Run the workflow", "An operations administrator must start the checks."),
+    "processing": ("system", "wait_for_processing", "Wait for processing", "The workflow is currently running."),
+    "reviewed": ("admin", "review_result", "Review the result", "An operations administrator must review the completed checks."),
+    "needs_info": ("requester", "provide_information", "Provide more information", "The request is missing information needed to continue."),
+    "pending_approval": ("approver", "decide_approval", "Await approval", "An eligible approver must decide this request."),
+    "changes_requested": ("requester", "resubmit_request", "Update and resubmit", "The approver requested changes before a decision."),
+    "approval_expired": ("admin", "rerun_workflow", "Re-run the workflow", "The approval expired without a decision."),
+    "approved": ("none", "complete", "No action needed", "The request is approved; any purchase order remains a draft."),
+    "rejected": ("none", "complete", "No action needed", "The request is closed."),
+    "failed": ("admin", "retry_workflow", "Retry the workflow", "The previous workflow run failed."),
+    "persistence_error": ("admin", "retry_workflow", "Retry the workflow", "The result could not be saved completely."),
+}
+
+
+def _pending_action(doc: dict) -> PendingAction:
+    status = str(doc.get("status") or "unknown")
+    owner, code, label, reason = _PENDING_ACTIONS.get(
+        status, ("admin", "review_request", "Review the request", "The request needs operator review.")
+    )
+    blocked = status in {"rejected", "approved"}
+    return PendingAction(required=owner != "none", owner=owner, code=code, label=label,
+                         reason=reason, blocked=blocked,
+                         blocked_reason="This request is in a terminal state." if blocked else None)
+
+
+def _timeline(doc: dict, *, requester: bool = False) -> list[TimelineEvent]:
+    """Return a bounded projection of the append-only audit history."""
+    events = get_audit_entries(str(doc["ticket_id"]))
+    projected: list[TimelineEvent] = []
+    for event in events:
+        agent = str(event.get("agent") or "System")
+        actor = "Requester" if agent == "User" else "Approvals" if "approv" in agent.lower() else (
+            "Operations" if agent in {"Admin", "System"} else "Workflow"
+        )
+        evidence_refs = [
+            str(item.get("source") or item.get("ref") or "")
+            for item in event.get("evidence") or []
+            if isinstance(item, dict) and (item.get("source") or item.get("ref"))
+        ]
+        summary = str(event.get("detail") or "Workflow update recorded.")
+        if requester:
+            summary = re.sub(r"\b(?:INV|DRAFT|REQ|PO|RFQ)-[A-Za-z0-9-]+\b", "record", summary)
+            evidence_refs = [
+                ref for ref in evidence_refs
+                if not ref.startswith(("data:", "po:", "vendor:", "invoice:"))
+            ]
+        projected.append(TimelineEvent(
+            sequence=int(event.get("sequence", event.get("step", len(projected) + 1))),
+            actor=actor,
+            action=str(event.get("action") or "workflow_update"),
+            status=str(event.get("status") or "info"),
+            summary=summary[:1000],
+            timestamp=event["timestamp"],
+            evidence_refs=evidence_refs[:20],
+        ))
+    return projected
+
+
 def _owner_viewer(doc: dict) -> UserPublic:
     return UserPublic(username=doc.get("owner_username") or "", name=doc.get("owner_name") or "",
                       email=doc.get("owner_email") or "", role="user")
@@ -740,6 +802,8 @@ def to_user_view(doc: dict) -> UserTicketView:
         policy_evidence=(redact_policy_evaluation(ev, doc["ticket_id"])
                          if (ev := _latest_policy_evaluation(doc)) else None),
         policy_status=_requester_policy_status(_policy_status(doc)),
+        timeline=_timeline(doc, requester=True),
+        pending_action=_pending_action(doc),
         created_at=doc.get("created_at"),
         updated_at=doc.get("updated_at"),
     )
@@ -754,6 +818,8 @@ def to_admin_view(doc: dict, viewer: Optional[UserPublic] = None) -> AdminTicket
         policy_evaluation=_latest_policy_evaluation(doc),
         policy_status=_policy_status(doc),
         invoice_match=doc.get("invoice_match"),
+        timeline=_timeline(doc),
+        pending_action=_pending_action(doc),
         ticket_id=doc["ticket_id"],
         status=doc.get("status") or "unknown",
         owner_username=doc.get("owner_username"),
