@@ -1,4 +1,5 @@
 fastapi>=0.110
+python-multipart>=0.0.9  # required by FastAPI for the policy PDF upload form (UploadFile/Form)
 uvicorn[standard]>=0.29
 pydantic>=2.6
 openai>=1.30
@@ -8,4 +9,5 @@ httpx>=0.27
 pymongo>=4.6
 mongomock>=4.1  # test-only in-memory MongoDB
 pypdf>=4.2
+numpy>=1.26  # vector math in app/policy_rag/embeddings.py
 tiktoken>=0.7  # optional: exact token counts; falls back to a conservative estimate if missing
