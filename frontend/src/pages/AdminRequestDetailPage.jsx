@@ -16,6 +16,7 @@ import {
   addAdminNote, APPROVAL_TICKET_STATUSES, getAdminAudit, getAdminTicket, getTicketApproval, listInvoices, matchInvoice,
   NOT_RUNNABLE_STATUSES, previewInvoiceCheck, reconcileApproval, rejectAdminTicket, runAdminTicket, todayIso,
 } from "../api/requests";
+import WorkflowTimeline, { PendingActionBanner } from "../components/WorkflowTimeline";
 import "../styles/pages/requests.css";
 
 const NOT_RUNNABLE_REASON = {
@@ -264,6 +265,8 @@ export default function AdminRequestDetailPage() {
       <Link to="/admin/requests" className="small row"><ArrowLeft size={14} aria-hidden="true" />All requests</Link>
       <PageHeader title={view.submission?.title || `Request ${tid}`} description="Review the request, run the checks and follow the approval." />
       {flash && <Notice tone="success" role="status">{flash}</Notice>}
+      <PendingActionBanner action={view.pending_action} />
+      <WorkflowTimeline events={view.timeline} />
 
       <section className="card req-section" aria-labelledby="ad-summary">
         <h2 id="ad-summary" className="sr-only">Summary</h2>
