@@ -12,7 +12,11 @@ Execution flow, function call sequence and file dependencies: see [Docs/flow.md]
 - **Policy library (RAG):** admins upload multiple policy, vendor and rate-card PDFs. Each ticket run retrieves cited evidence (file, page, section), checks quotes against verified rate cards with Decimal arithmetic, and adds review reasons to the approval request. Approvers verify extracted rate rows. The 3 PDFs in `data/policies` are ingested automatically on first start.
 - **Dynamic policy engine (Phase 3):** business rules are reviewed, versioned data rather than code. Admins extract candidate rules from ready PDFs (LLM with deterministic fallback, cited evidence, prompt-injection flags). Approvers validate and approve or reject them; nothing activates automatically. Every ticket run evaluates the active policy-set version deterministically, and approvals are bound to that version, so a policy change makes them stale.
 - Every draft PO needs an approver's sign-off. Approval records an internal authorization only: the PO stays a draft, and no order or payment is executed.
-- **Payments (Simulation) — no money is ever transferred:** for an approved ticket with a matched invoice, an admin can create one **simulated** payment instruction on the "Payments (Simulation)" page. The backend re-checks eligibility on every request: approval current and bound to the active policy set, invoice matched, no duplicate or policy block, canonical Decimal amount, allow-listed currency. It is idempotent (same key → same payment; changed payload → 409) and fully audited. A local deterministic simulator returns an "Accepted by simulator" receipt with a fake `PAY-SIM-…` reference. There is no bank or gateway SDK and no network call, and every response says `mode: "SIMULATION"`, `money_transferred: false`. Disabled unless `PAYMENT_MODE=simulation` and `PAYMENT_SIMULATION_ENABLED=true`. Approvers can view payments read-only; users can't see them.
+- **Payments (Simulation) — no money is ever transferred:** for an approved ticket with a matched invoice, an admin can create one **simulated** payment instruction on the "Payments (Simulation)" page. The backend re-checks eligibility on every request: approval current and bound to the active policy set, invoice matched, no duplicate or policy block, canonical Decimal amount, allow-listed currency. It is idempotent (same key → same payment; changed payload → 409) and fully audited. A local deterministic simulator returns an "Accepted by simulator" receipt with a fake `PAY-SIM-…` reference. There is no bank or gateway SDK and no network call, and every response says `mode: "SIMULATION"`, `money_transferred: false`. Disabled unless `PAYMENT_MODE=simulation` and `PAYMENT_SIMULATION_ENABLED=true`. Approvers can view payments read-only; users can't see them. The page lists ready requests first. A blocked invoice shows the checks it failed and a next step.
+- **Invoice exceptions (record-keeping only):** on an approved request whose invoice was matched after approval, admins can put the invoice on hold, dispute it, record the vendor's response, release the hold or reject it (`POST /api/admin/tickets/{id}/invoice-exception`). Payment eligibility returns `INVOICE_ON_HOLD`, `INVOICE_DISPUTED` or `INVOICE_REJECTED` while an exception is open. Matching a corrected invoice replaces the current match and closes the exception; the old match stays in `invoice_history`, and every step is audited. Nothing is sent to the vendor.
+- **Why these decisions?** The admin request page explains the policy, vendor, cost, invoice and final outcomes. The explanations are built only from the recorded checks and their evidence (`app/explanations.py`), with no LLM, so they always match the outcome.
+- **My inbox (`/inbox`, `GET /api/inbox`):** pending actions for each role, worked out on the server. Admins see runs, reviews, invoices to match or resolve, and payments to simulate or retry. Approvers see approvals waiting for them (never their own requests). Requesters see requests that need more info or a resubmit. An item is flagged "Stalled" after `INBOX_STALL_HOURS` (default 24).
+- **Spend analytics (`/admin/analytics`, `/analytics` for approvers):** spend by vendor, category and month, budget against actual, cycle times, invoice exception rate, top policy blocks and simulated payments, with CSV export (`GET /api/analytics/summary`, `/api/analytics/export.csv`).
 - **Vendor sourcing — advisory only (admin, "🏪 Vendor sourcing"):** this feature runs entirely inside the system; no supplier is contacted and nothing is awarded, dispatched or paid. Admins:
   - search the internal catalog first, then the candidate registry (external discovery is off);
   - onboard candidates (they start `pending_review`; approve, reject or suspend with a reason; duplicates give 409);
@@ -42,6 +46,15 @@ Stop-Process -Id <PID>
 # or: python -m uvicorn app.main:app --port 8001  and start the UI with $env:VITE_API_BASE_URL="http://127.0.0.1:8001"
 ```
 
+### Docker & backups
+```powershell
+copy .env.example .env                  # then edit; compose reads secrets only from .env
+docker compose up --build               # MongoDB 7 + API (http://localhost:8000/docs) + UI (http://localhost:5173)
+.\scripts\backup_mongo.ps1               # mongodump -> backups\<db>-<yyyyMMdd-HHmmss>.archive.gz
+.\scripts\restore_mongo.ps1 -Archive backups\<file>.archive.gz [-Drop]   # mongorestore (confirms first)
+```
+The compose file overrides `MONGODB_URI` to `mongodb://mongo:27017/` for the API container; Mongo data and uploaded PDFs live in named volumes. The backup scripts need MongoDB Database Tools on PATH, read `MONGODB_URI`/`MONGODB_DATABASE` from the environment (defaults: localhost, `workplaceops`) and never print the URI. Keep `backups\` out of git. CI (`.github/workflows/tests.yml`) runs backend pytest and frontend tests + build on every push/PR. Every API response carries an `X-Request-ID` header (a safe inbound value is echoed, otherwise a new one is generated).
+
 **Before committing:** `git check-ignore -v .env` must print the `.env` rule, and `git ls-files .env` must print nothing. Keep config and docs saved as UTF-8 without a BOM.
 
 `.env` settings:
@@ -70,6 +83,7 @@ The LLM handles only language work: extraction and summaries. All arithmetic and
 |---|---|---|
 | happy_path | INV-5001 | pass. Preferred vendor unavailable → re-planned to VEN-002, ₹76,125 |
 | happy_path | INV-5002 | blocked. Rate 720≠700, 95 delivered vs 100 billed |
+| happy_path, no invoice at run → approve → match INV-5002 → dispute → match **INV-5002-R** | INV-5002-R | corrected invoice (rate 700, DEL-7003 full delivery) → eligible for simulated payment |
 | happy_path | INV-4987 | blocked. Duplicate invoice (FIN-5.4) |
 | over_budget | — | blocked. ₹90,825 > ₹60,000, no PO |
 | too_soon | — | blocked. Lead time < 5 business days (EVT-2.2) |

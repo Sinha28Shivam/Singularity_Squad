@@ -59,7 +59,7 @@ from app.repositories import (
     update_ticket_result,
     upsert_draft_po,
 )
-from app.repositories.ticket_repository import search_tickets
+from app.repositories.ticket_repository import search_tickets, set_invoice_exception
 from app.schemas import AuditEntry, WorkflowResult
 from app.services.errors import TicketError
 
@@ -434,7 +434,8 @@ def match_invoice_after_approval(ticket_id: str, admin: UserPublic, invoice_id: 
 
     The workflow result, PO and approval are not changed (re-running would supersede the approval); the
     result is stored separately as ``invoice_match`` and bound to the approved PO and run. Nothing is paid.
-    Re-matching is refused once a simulated payment exists for the ticket.
+    Re-matching (e.g. a corrected invoice after a dispute) supersedes the previous match, which is kept in
+    ``invoice_history``; it is refused once a simulated payment exists for the ticket.
     """
     from app.agents import billing, policy
     from app.schemas import DraftPO
@@ -464,13 +465,149 @@ def match_invoice_after_approval(ticket_id: str, admin: UserPublic, invoice_id: 
     match.update({"po_id": draft.po_id, "po_total": draft.total, "currency": draft.currency,
                   "run_count": int(doc.get("run_count") or 0), "matched_by": admin.username, "matched_at": at,
                   "post_approval": True})
-    if not set_invoice_match(ticket_id, match, expected={"approved"}):
-        raise TicketError(409, "Ticket status changed; please reload and try again.")
+    previous = doc.get("invoice_match") if isinstance(doc.get("invoice_match"), dict) else None
+    exc = doc.get("invoice_exception") if isinstance(doc.get("invoice_exception"), dict) else None
+    history = []
+    superseded = previous
+    if superseded is not None:
+        history.append({**_history_entry(superseded, exc), "superseded_by": rec.invoice_id,
+                        "superseded_at": at, "superseded_by_user": admin.username})
+    if not set_invoice_match(ticket_id, match, expected={"approved"},
+                             replaces=previous.get("matched_at") if previous else None, push_history=history):
+        raise TicketError(409, "The ticket or its invoice match changed; please reload and try again.")
+    replaced = (f" Replaces {superseded.get('invoice_id')} ({superseded.get('status')})."
+                if superseded is not None else "")
     _audit_event(ticket_id, "Billing Guardian", "post_approval_invoice_match",
                  f"{rec.invoice_id} matched after approval against approved {draft.po_id}: {rec.status}; "
                  f"expected INR {rec.expected_total:,.2f}, invoiced INR {rec.invoiced_total:,.2f}. "
-                 f"{rec.recommendation} No payment was made.", status="pass" if rec.status == "match" else "fail")
+                 f"{rec.recommendation}{replaced} No payment was made.",
+                 status="pass" if rec.status == "match" else "fail")
     return _load(ticket_id)
+
+
+# ---------- invoice exceptions (hold / dispute / reject) — SIMULATION ONLY, nothing is paid ----------
+# action -> (allowed current states, new state). ``None`` means "no open exception".
+_INVOICE_EXCEPTION_ACTIONS: dict[str, tuple[frozenset, Optional[str]]] = {
+    "hold": (frozenset({None}), "on_hold"),
+    "dispute": (frozenset({None, "on_hold"}), "disputed"),
+    "vendor_response": (frozenset({"disputed"}), "disputed"),
+    "release": (frozenset({"on_hold"}), None),
+    "reject": (frozenset({None, "on_hold", "disputed"}), "rejected"),
+}
+INVOICE_EXCEPTION_ACTIONS = tuple(_INVOICE_EXCEPTION_ACTIONS)
+
+
+def _failed_checks(rec: dict) -> list[dict]:
+    return [{"name": c.get("name"), "status": c.get("status"), "detail": c.get("detail")}
+            for c in rec.get("checks") or [] if isinstance(c, dict) and c.get("status") in {"fail", "warn"}][:20]
+
+
+def _history_entry(match: dict, exception: Optional[dict]) -> dict:
+    return {"invoice_id": match.get("invoice_id"), "status": match.get("status"),
+            "invoiced_total": match.get("invoiced_total"), "expected_total": match.get("expected_total"),
+            "variance": match.get("variance"), "matched_by": match.get("matched_by"),
+            "matched_at": match.get("matched_at"),
+            "exception_state": (exception or {}).get("state"),
+            "exception_reason": (exception or {}).get("reason")}
+
+
+def invoice_exception_action(ticket_id: str, admin: UserPublic, action: str, note: str) -> dict:
+    """Hold, dispute, record a vendor response, release or reject the post-approval matched invoice.
+
+    Purely a record-keeping workflow: nothing is sent to the vendor and nothing is paid. The payment
+    eligibility gate blocks simulation while an exception is open. A corrected invoice is handled by matching
+    it (``match_invoice_after_approval``), which supersedes the current match and closes the exception.
+    """
+    _require_persistence()
+    if action not in _INVOICE_EXCEPTION_ACTIONS:
+        raise TicketError(422, "Unknown invoice exception action.")
+    note = (note or "").strip()
+    if len(note) < 5:
+        raise TicketError(422, "Please give a reason of at least 5 characters.")
+    doc = _load(ticket_id)
+    if doc.get("status") != "approved":
+        raise TicketError(409, "Invoice exceptions apply only to approved tickets.")
+    match, post_approval = effective_invoice(doc)
+    if match is None:
+        raise TicketError(409, "Match an invoice before raising an invoice exception.")
+    if not post_approval:
+        raise TicketError(409, "This invoice was checked during the workflow run and is covered by the approval; "
+                               "invoice exceptions apply to invoices matched after approval.")
+    from app.repositories.payment_repository import list_simulations
+    if list_simulations(ticket_id, limit=1):
+        raise TicketError(409, "A simulated payment already exists for this ticket; the invoice can't change.")
+    allowed, new_state = _INVOICE_EXCEPTION_ACTIONS[action]
+    current = doc.get("invoice_exception") if isinstance(doc.get("invoice_exception"), dict) else None
+    if current is not None and current.get("invoice_id") != match.get("invoice_id"):
+        current = None  # stale record from a superseded match
+    state = (current or {}).get("state")
+    if state not in allowed:
+        raise TicketError(409, f"Can't {action.replace('_', ' ')} an invoice that is {state or 'not on hold'}.")
+    if action == "dispute" and match.get("status") == "match":
+        raise TicketError(409, "The invoice matched; there is nothing to dispute.")
+
+    at = _now()
+    entry = {"action": action, "by": admin.username, "at": at, "note": note[:1000]}
+    if new_state is None:
+        exception = None
+    else:
+        exception = dict(current or {"invoice_id": match.get("invoice_id"), "created_by": admin.username,
+                                     "created_at": at, "events": []})
+        exception.update({"state": new_state, "updated_by": admin.username, "updated_at": at})
+        if action in {"hold", "dispute", "reject"}:
+            exception["reason"] = note[:1000]
+        if action == "dispute":
+            exception["failed_checks"] = _failed_checks(match)
+        if action == "vendor_response":
+            exception["vendor_response"] = note[:1000]
+        exception["events"] = [*(exception.get("events") or []), entry][-50:]
+    history = {**_history_entry(match, exception or current), "action": action, "at": at, "by": admin.username,
+               "note": note[:1000]}
+    previous = doc.get("invoice_exception") if isinstance(doc.get("invoice_exception"), dict) else None
+    if not set_invoice_exception(ticket_id, exception, previous=previous, push_history=history):
+        raise TicketError(409, "The invoice exception changed; please reload and try again.")
+    labels = {"hold": "put on hold", "dispute": "disputed with the vendor (recorded only; nothing was sent)",
+              "vendor_response": "vendor response recorded", "release": "released from hold",
+              "reject": "rejected"}
+    _audit_event(ticket_id, "Billing Guardian", f"invoice_exception_{action}",
+                 f"Invoice {match.get('invoice_id')} {labels[action]} by {admin.username}: {note[:300]} "
+                 "No payment was made.", status="fail" if action in {"dispute", "reject"} else "info")
+    return _load(ticket_id)
+
+
+def effective_invoice(doc: dict) -> tuple[Optional[dict], bool]:
+    """The reconciliation that governs payment, and whether it is a post-approval match.
+
+    Mirrors ``app.payments.eligibility``: the workflow run's reconciliation wins; a post-approval match applies
+    only when the run had no invoice.
+    """
+    wr = doc.get("workflow_result") if isinstance(doc.get("workflow_result"), dict) else {}
+    recon = wr.get("reconciliation") if isinstance(wr.get("reconciliation"), dict) else None
+    match = doc.get("invoice_match") if isinstance(doc.get("invoice_match"), dict) else None
+    if recon is None and match is not None and match.get("post_approval"):
+        return match, True
+    return recon, False
+
+
+def _current_exception(doc: dict) -> Optional[dict]:
+    exc = doc.get("invoice_exception") if isinstance(doc.get("invoice_exception"), dict) else None
+    match = doc.get("invoice_match") if isinstance(doc.get("invoice_match"), dict) else None
+    return exc if exc and match and exc.get("invoice_id") == match.get("invoice_id") else None
+
+
+def invoice_status(doc: dict) -> Optional[str]:
+    """Payment readiness of an approved ticket's invoice, derived from stored records (view-only)."""
+    if doc.get("status") != "approved":
+        return None
+    rec, post_approval = effective_invoice(doc)
+    if rec is None:
+        return "needs_invoice"
+    exc = doc.get("invoice_exception") if isinstance(doc.get("invoice_exception"), dict) else None
+    if post_approval and exc and exc.get("invoice_id") == rec.get("invoice_id") and exc.get("state"):
+        return str(exc["state"])
+    if rec.get("status") == "duplicate":
+        return "duplicate"
+    return "matched" if rec.get("status") == "match" else "mismatch"
 
 
 def _note(author: UserPublic, text: str) -> dict:
@@ -812,12 +949,26 @@ def to_user_view(doc: dict) -> UserTicketView:
 _SYSTEM_ADMIN_VIEWER = UserPublic(username="", name="Admin", email="", role="admin")
 
 
+def _explanations(doc: dict, policy_status: Optional[dict]) -> list[dict]:
+    from app.explanations import build_explanations
+    try:
+        return [e.model_dump(mode="json") for e in build_explanations(doc, policy_status)]
+    except Exception as exc:  # noqa: BLE001 - view-only; never block the ticket view
+        logger.warning("Explanations unavailable for ticket %s (%s)", doc.get("ticket_id"), type(exc).__name__)
+        return []
+
+
 def to_admin_view(doc: dict, viewer: Optional[UserPublic] = None) -> AdminTicketView:
+    policy_status = _policy_status(doc)
     return AdminTicketView(
         approval=_ticket_approval(doc, viewer or _SYSTEM_ADMIN_VIEWER),
         policy_evaluation=_latest_policy_evaluation(doc),
-        policy_status=_policy_status(doc),
+        policy_status=policy_status,
+        explanations=_explanations(doc, policy_status),
         invoice_match=doc.get("invoice_match"),
+        invoice_exception=_current_exception(doc),
+        invoice_history=[h for h in doc.get("invoice_history") or [] if isinstance(h, dict)][-50:],
+        invoice_status=invoice_status(doc),
         timeline=_timeline(doc),
         pending_action=_pending_action(doc),
         ticket_id=doc["ticket_id"],
@@ -850,6 +1001,7 @@ def to_list_item(doc: dict, admin: bool) -> TicketListItem:
         status=doc.get("status") or "unknown",
         final_status=(doc.get("workflow_result") or {}).get("final_status"),
         run_count=int(doc.get("run_count") or 0),
+        invoice_status=invoice_status(doc) if admin else None,
         created_at=doc.get("created_at"),
         updated_at=doc.get("updated_at"),
     )

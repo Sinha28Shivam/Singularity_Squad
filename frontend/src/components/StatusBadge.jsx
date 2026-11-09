@@ -72,7 +72,18 @@ const PAYMENT = {
   processing_simulated: ["Simulated processing", "info"],
   failed_simulated: ["Simulation failed (retryable)", "warning"],
 };
-const MAPS = { ticket: TICKET, approval: APPROVAL, outcome: OUTCOME, vendor: VENDOR, policy: POLICY, payment: PAYMENT };
+const INVOICE = {
+  needs_invoice: ["Needs invoice", "neutral"],
+  matched: ["Ready to simulate", "success"],
+  mismatch: ["Invoice mismatch", "error"],
+  duplicate: ["Duplicate invoice", "error"],
+  on_hold: ["Invoice on hold", "warning"],
+  disputed: ["Invoice disputed", "warning"],
+  rejected: ["Invoice rejected", "error"],
+};
+const MAPS = {
+  ticket: TICKET, approval: APPROVAL, outcome: OUTCOME, vendor: VENDOR, policy: POLICY, payment: PAYMENT, invoice: INVOICE,
+};
 
 export function statusLabel(status, kind = "ticket") {
   const entry = (MAPS[kind] || {})[status];

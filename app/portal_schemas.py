@@ -167,6 +167,7 @@ class TicketListItem(BaseModel):
     status: str
     final_status: Optional[str] = None
     run_count: int = 0
+    invoice_status: Optional[str] = None   # admin list only: needs_invoice | matched | mismatch | on_hold | ...
     created_at: Optional[dt.datetime] = None
     updated_at: Optional[dt.datetime] = None
 
@@ -209,6 +210,10 @@ class AdminTicketView(BaseModel):
     policy_evaluation: Optional[dict] = None       # latest policy evaluation snapshot (Policy RAG)
     policy_status: Optional[dict] = None           # server-derived requirement flags (clarification AND block)
     invoice_match: Optional[dict] = None           # invoice matched after approval (payments simulation)
+    invoice_exception: Optional[dict] = None       # open hold/dispute/rejection on the post-approval invoice
+    invoice_history: list[dict] = Field(default_factory=list)   # superseded matches + exception actions
+    invoice_status: Optional[str] = None           # payment readiness of an approved ticket's invoice
+    explanations: list[dict] = Field(default_factory=list)   # deterministic DecisionExplanation per topic
     timeline: list[TimelineEvent] = Field(default_factory=list)
     pending_action: PendingAction
     created_at: Optional[dt.datetime] = None

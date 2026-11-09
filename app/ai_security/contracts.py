@@ -51,6 +51,21 @@ class IntakeFieldsOutput(BaseModel):
         return [str(r)[:100] for r in v][:20] if isinstance(v, list) else None
 
 
+class InvoiceFieldsOutput(BaseModel):
+    """Suggested invoice header fields. Only fills gaps left by the deterministic parser and is re-sanitised;
+    every value still needs human verification."""
+    model_config = ConfigDict(extra="ignore")
+    invoice_id: Optional[str] = Field(default=None, max_length=40)
+    vendor_id: Optional[str] = Field(default=None, max_length=64)
+    po_id: Optional[str] = Field(default=None, max_length=64)
+    invoice_date: Optional[str] = Field(default=None, max_length=20)
+    delivery_id: Optional[str] = Field(default=None, max_length=64)
+    subtotal: Optional[float] = Field(default=None, ge=0, le=1e13)
+    tax: Optional[float] = Field(default=None, ge=0, le=1e13)
+    total: Optional[float] = Field(default=None, ge=0, le=1e13)
+    currency: Optional[str] = Field(default=None, max_length=8)
+
+
 class RuleExtractionOutput(BaseModel):
     """Envelope only: each rule item is validated individually by the extractor (typed rule language +
     evidence checks, first MAX_CANDIDATES items), so one malformed item does not discard valid siblings."""
@@ -80,6 +95,9 @@ TASKS: dict[str, TaskContract] = {c.name: c for c in (
     TaskContract("request_field_extraction", "1", "intake-v1", "json", IntakeFieldsOutput,
                  max_output_tokens=400, max_input_tokens=4000, sensitive_content_allowed=True,
                  fallback="deterministic regex parser (always runs and wins on numeric fields)"),
+    TaskContract("invoice_field_extraction", "1", "invoice-extract-v1", "json", InvoiceFieldsOutput,
+                 max_output_tokens=300, max_input_tokens=4000, sensitive_content_allowed=True,
+                 fallback="deterministic regex parser (always runs and wins); a human verifies every field"),
     TaskContract("policy_rule_extraction", "1", "rule-extract-v1", "json", RuleExtractionOutput,
                  max_output_tokens=4000, max_input_tokens=24000, sensitive_content_allowed=False,
                  fallback="deterministic pattern extractor (pattern-v1); candidates always need human review"),

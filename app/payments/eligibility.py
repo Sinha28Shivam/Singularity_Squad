@@ -34,6 +34,9 @@ MESSAGES = {
     "INVOICE_PO_MISMATCH": "The invoice or purchase order does not match the ticket's reconciled records.",
     "DUPLICATE_INVOICE": "The invoice was flagged as a duplicate.",
     "INVOICE_MATCH_FAILED": "The invoice did not match the purchase order and delivery.",
+    "INVOICE_ON_HOLD": "The invoice is on hold.",
+    "INVOICE_DISPUTED": "The invoice is in dispute with the vendor. Match a corrected invoice to continue.",
+    "INVOICE_REJECTED": "The invoice was rejected. Match a corrected invoice to continue.",
     "PO_NOT_FOUND": "No draft purchase order exists for this ticket.",
     "POLICY_BLOCK": "A policy check blocks this request.",
     "CLARIFICATION_REQUIRED": "The request has unresolved clarifications.",
@@ -107,8 +110,13 @@ def _canon_po(po: Optional[dict]) -> Optional[dict]:
 
 
 def _known_invoice(invoice_id: str) -> bool:
+    # Demo fixtures + human-verified uploads. Deliberately not via app.agents.billing: the payments package
+    # must stay isolated from the agents (see tests/test_no_external_execution.py).
     from app.data_loader import load_json
-    return any(i.get("invoice_id") == invoice_id for i in load_json("invoices.json") if isinstance(i, dict))
+    from app.invoice_intake.service import verified_invoices
+    if any(i.get("invoice_id") == invoice_id for i in load_json("invoices.json") if isinstance(i, dict)):
+        return True
+    return any(i.invoice_id == invoice_id for i in verified_invoices())
 
 
 def _previously_paid(invoice_id: str, vendor_id: Optional[str]) -> bool:
@@ -240,6 +248,12 @@ def evaluate_eligibility(ticket_id: str, invoice_id: str, actor: UserPublic, *,
             reasons.add("DUPLICATE_INVOICE")
         elif status != "match":
             reasons.add("INVOICE_MATCH_FAILED")
+        exc = (ticket or {}).get("invoice_exception")
+        if post_approval_match and isinstance(exc, dict) and exc.get("invoice_id") == recon.get("invoice_id"):
+            code = {"on_hold": "INVOICE_ON_HOLD", "disputed": "INVOICE_DISPUTED",
+                    "rejected": "INVOICE_REJECTED"}.get(exc.get("state"))
+            if code:
+                reasons.add(code)
     if invoice_known and _read(_previously_paid, invoice_id, (po or {}).get("vendor_id")):
         reasons.add("DUPLICATE_INVOICE", "The invoice already appears in the payment history.")
 
@@ -307,7 +321,7 @@ def evaluate_eligibility(ticket_id: str, invoice_id: str, actor: UserPublic, *,
         else:
             if purchase_order_id is not None and snap_po.get("po_id") != purchase_order_id:
                 reasons.add("INVOICE_PO_MISMATCH", "The purchase order is not the approved PO.")
-            if canonical_amount is not None and _to_money(snap_po.get("total")) != canonical_amount:
+            if recon_matches and canonical_amount is not None and _to_money(snap_po.get("total")) != canonical_amount:
                 reasons.add("AMOUNT_MISMATCH", "The approved PO total does not equal the invoiced amount.")
             if canonical_currency is not None and snap_po.get("currency") != canonical_currency:
                 reasons.add("APPROVAL_STALE", "The approved currency differs from the current PO.")

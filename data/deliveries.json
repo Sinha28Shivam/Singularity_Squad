@@ -22,5 +22,17 @@
     },
     "signed_by": "Facilities Desk (synthetic)",
     "notes": "5 meals short; vendor notified."
+  },
+  {
+    "delivery_id": "DEL-7003",
+    "po_id": "DRAFT-PO-1001",
+    "vendor_id": "VEN-002",
+    "delivered_on": "2026-10-27",
+    "items": {
+      "Lunch": 100,
+      "Delivery & setup": 1
+    },
+    "signed_by": "Facilities Desk (synthetic)",
+    "notes": "Corrected delivery: the 5 short meals were delivered on 2026-10-27; rate corrected to 700."
   }
 ]

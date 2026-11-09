@@ -73,5 +73,30 @@
     "tax": 3625.0,
     "total": 76125.0,
     "currency": "INR"
+  },
+  {
+    "invoice_id": "INV-5002-R",
+    "po_id": "DRAFT-PO-1001",
+    "vendor_id": "VEN-002",
+    "invoice_date": "2026-10-28",
+    "delivery_id": "DEL-7003",
+    "line_items": [
+      {
+        "description": "Lunch",
+        "quantity": 100,
+        "unit_price": 700,
+        "line_total": 70000
+      },
+      {
+        "description": "Delivery & setup",
+        "quantity": 1,
+        "unit_price": 2500,
+        "line_total": 2500
+      }
+    ],
+    "subtotal": 72500,
+    "tax": 3625.0,
+    "total": 76125.0,
+    "currency": "INR"
   }
 ]

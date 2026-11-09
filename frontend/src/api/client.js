@@ -76,11 +76,11 @@ async function parseBody(res) {
 }
 
 /**
- * request(method, path, {query, json, body, headers, timeoutMs, auth=true, raw=false})
- * Returns parsed JSON (or Blob for PDFs). Throws ApiError.
+ * request(method, path, {query, json, body, headers, timeoutMs, auth=true, raw=false, blob=false})
+ * Returns parsed JSON (or Blob for PDFs, or for any successful response when blob=true). Throws ApiError.
  */
 export async function request(method, path, opts = {}) {
-  const { query, json, body, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, auth = true } = opts;
+  const { query, json, body, headers = {}, timeoutMs = DEFAULT_TIMEOUT_MS, auth = true, blob = false } = opts;
   const url = new URL(API_BASE + path);
   if (query) {
     for (const [k, v] of Object.entries(query)) {
@@ -104,7 +104,7 @@ export async function request(method, path, opts = {}) {
   } finally {
     clearTimeout(timer);
   }
-  const data = await parseBody(res);
+  const data = blob && res.ok ? await res.blob() : await parseBody(res);
   if (!res.ok) {
     const detail = detailFrom(data);
     if (res.status === 401 && auth && token) {
@@ -125,7 +125,25 @@ export const api = {
     request("POST", path, { ...opts, query, body: data, headers: { "Content-Type": contentType } }),
   /** Multipart upload (e.g. policy documents). */
   postForm: (path, formData, query, opts) => request("POST", path, { ...opts, query, body: formData }),
+  /** Authenticated file download (e.g. CSV export). Resolves to a Blob; errors still become ApiError. */
+  download: (path, query, opts) =>
+    request("GET", path, { ...opts, query, blob: true, headers: { Accept: "text/csv, application/json;q=0.9, */*;q=0.8", ...(opts?.headers || {}) } }),
 };
+
+/** Save a Blob as a file via a temporary object URL (no-op where object URLs are unavailable). */
+export function saveBlob(blob, filename) {
+  if (typeof URL === "undefined" || typeof URL.createObjectURL !== "function") return false;
+  const href = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = href;
+  a.download = filename;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL?.(href), 0);
+  return true;
+}
 
 /** Generate a client idempotency key (approval decisions, payments). */
 export function idempotencyKey(prefix = "ui") {

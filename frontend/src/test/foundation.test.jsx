@@ -42,8 +42,11 @@ describe("navigation by role", () => {
     const labels = (r, o) => navForRole(r, o).flatMap((s) => s.items.map((i) => i.label));
     expect(labels("admin")).not.toContain("Payments (Simulation)");
     expect(labels("admin", { paymentsEnabled: true })).toContain("Payments (Simulation)");
-    expect(labels("approver")).toEqual(["Pending approvals", "Approval history", "Policy review"]);
-    expect(labels("user")).toEqual(["My requests", "New request"]);
+    expect(labels("approver")).toEqual(["My inbox", "Pending approvals", "Approval history", "Policy review", "Spend analytics"]);
+    expect(navForRole("approver").flatMap((s) => s.items.map((i) => i.to))).not.toContain("/admin/analytics");
+    expect(labels("admin")).toContain("Spend analytics");
+    expect(labels("user")).toEqual(["My inbox", "My requests", "New request"]);
+    expect(labels("admin")).toContain("My inbox");
   });
 });
 

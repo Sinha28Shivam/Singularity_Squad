@@ -39,6 +39,9 @@ export const addAdminNote = (id, text) => api.post(`/api/admin/tickets/${enc(id)
 export const getAdminAudit = (id, limit = 500) => api.get(`/api/admin/tickets/${enc(id)}/audit`, { limit });
 export const matchInvoice = (id, invoiceId) =>
   api.post(`/api/admin/tickets/${enc(id)}/invoice-match`, { invoice_id: invoiceId });
+/** POST invoice-exception {action: hold|dispute|vendor_response|release|reject, note}. Record-keeping only. */
+export const invoiceException = (id, action, note) =>
+  api.post(`/api/admin/tickets/${enc(id)}/invoice-exception`, { action, note });
 export const reconcileApproval = (approvalId) => api.post(`/api/admin/approvals/${enc(approvalId)}/reconcile`);
 /** POST /api/reconcile {po, invoice_id} -> ReconciliationReport. Ad-hoc preview: nothing is stored on the ticket. */
 export const previewInvoiceCheck = (po, invoiceId) => api.post("/api/reconcile", { po, invoice_id: invoiceId }, { timeoutMs: 60000 });

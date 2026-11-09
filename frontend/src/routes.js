@@ -1,5 +1,6 @@
 import {
-  BookOpen, Building2, ClipboardCheck, ClipboardList, FilePlus2, FileText, History, Inbox, LayoutDashboard,
+  BarChart3, BellRing, BookOpen, Building2, ClipboardCheck, ClipboardList, FileInput, FilePlus2, FileText, History, Inbox,
+  LayoutDashboard,
   ListChecks, Receipt, ScrollText, Users,
 } from "lucide-react";
 
@@ -8,7 +9,10 @@ export function navForRole(role, { paymentsEnabled = false } = {}) {
   if (role === "admin") {
     const ops = [
       { to: "/admin", label: "Overview", icon: LayoutDashboard, end: true },
+      { to: "/inbox", label: "My inbox", icon: BellRing },
       { to: "/admin/requests", label: "All requests", icon: ClipboardList },
+      { to: "/admin/analytics", label: "Spend analytics", icon: BarChart3 },
+      { to: "/admin/invoices", label: "Invoice intake", icon: FileInput },
     ];
     const sourcing = [
       { to: "/admin/vendors", label: "Vendor sourcing", icon: Building2 },
@@ -29,16 +33,21 @@ export function navForRole(role, { paymentsEnabled = false } = {}) {
   if (role === "approver") {
     return [
       { title: "Approvals", items: [
+        { to: "/inbox", label: "My inbox", icon: BellRing },
         { to: "/approvals", label: "Pending approvals", icon: Inbox, end: true },
         { to: "/approvals/history", label: "Approval history", icon: History },
       ] },
       { title: "Policy", items: [
         { to: "/policy-review", label: "Policy review", icon: ListChecks },
       ] },
+      { title: "Insights", items: [
+        { to: "/analytics", label: "Spend analytics", icon: BarChart3 },
+      ] },
     ];
   }
   return [
     { title: "Requests", items: [
+      { to: "/inbox", label: "My inbox", icon: BellRing },
       { to: "/requests", label: "My requests", icon: Users, end: true },
       { to: "/requests/new", label: "New request", icon: FilePlus2 },
     ] },
@@ -52,6 +61,7 @@ export function homeFor(role) {
 }
 
 const TITLES = [
+  [/^\/inbox$/, "My inbox"],
   [/^\/requests\/new$/, "New request"],
   [/^\/requests\/[^/]+$/, "Request details"],
   [/^\/requests$/, "My requests"],
@@ -64,6 +74,9 @@ const TITLES = [
   [/^\/admin\/policy-rules/, "Policy rules"],
   [/^\/admin\/approvals/, "Approvals"],
   [/^\/admin\/payments/, "Payments (Simulation)"],
+  [/^\/admin\/invoices/, "Invoice intake"],
+  [/^\/admin\/analytics/, "Spend analytics"],
+  [/^\/analytics/, "Spend analytics"],
   [/^\/approvals\/history/, "Approval history"],
   [/^\/approvals/, "Pending approvals"],
   [/^\/policy-review/, "Policy review"],

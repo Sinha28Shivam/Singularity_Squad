@@ -17,12 +17,23 @@ def _q(x: float) -> str:
     return str(int(x)) if float(x).is_integer() else str(x)
 
 
-def load_invoices() -> list[Invoice]:
+def load_demo_invoices() -> list[Invoice]:
     return [Invoice(**i) for i in load_json("invoices.json")]
 
 
+def load_invoices() -> list[Invoice]:
+    """Demo fixtures plus human-VERIFIED uploaded invoices (fixtures only if Mongo is unavailable)."""
+    from app.invoice_intake.service import verified_invoices
+    demo = load_demo_invoices()
+    ids = {i.invoice_id for i in demo}
+    return demo + [i for i in verified_invoices() if i.invoice_id not in ids]
+
+
 def load_deliveries() -> list[DeliveryRecord]:
-    return [DeliveryRecord(**d) for d in load_json("deliveries.json")]
+    from app.invoice_intake.service import verified_deliveries
+    demo = [DeliveryRecord(**d) for d in load_json("deliveries.json")]
+    ids = {d.delivery_id for d in demo}
+    return demo + [d for d in verified_deliveries() if d.delivery_id not in ids]
 
 
 def load_history() -> list[dict]:
