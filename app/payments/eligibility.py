@@ -252,11 +252,12 @@ def evaluate_eligibility(ticket_id: str, invoice_id: str, actor: UserPublic, *,
 
     # --- canonical amount / currency ---
     canonical_amount = _to_money((recon or {}).get("invoiced_total")) if recon is not None else None
-    if recon is not None and canonical_amount is None:
+    recon_matches = recon is not None and recon.get("status") == "match"
+    if recon_matches and canonical_amount is None:
         reasons.add("AMOUNT_MISMATCH", "The reconciled invoice amount is missing or invalid.")
-    if canonical_amount is not None and po is not None and _to_money(po.get("total")) != canonical_amount:
+    if recon_matches and canonical_amount is not None and po is not None and _to_money(po.get("total")) != canonical_amount:
         reasons.add("AMOUNT_MISMATCH", "The invoiced amount does not equal the draft PO total.")
-    if amount is not None and canonical_amount is not None:
+    if amount is not None and recon_matches and canonical_amount is not None:
         try:
             client_amount = parse_money(amount)
         except (ValueError, ArithmeticError):

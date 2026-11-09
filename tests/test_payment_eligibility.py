@@ -227,7 +227,9 @@ def test_reconciliation_statuses(approved):
     assert {"DUPLICATE_INVOICE", "APPROVAL_STALE"} <= _codes(evaluate_eligibility(approved, "INV-5001", ADMIN))
     wr["reconciliation"]["status"] = "mismatch"
     _set_ticket(approved, workflow_result=wr)
-    assert {"INVOICE_MATCH_FAILED", "APPROVAL_STALE"} <= _codes(evaluate_eligibility(approved, "INV-5001", ADMIN))
+    codes = _codes(evaluate_eligibility(approved, "INV-5001", ADMIN))
+    assert {"INVOICE_MATCH_FAILED", "APPROVAL_STALE"} <= codes
+    assert "AMOUNT_MISMATCH" not in codes
 
 
 def test_invoice_in_payment_history_is_duplicate(approved):
