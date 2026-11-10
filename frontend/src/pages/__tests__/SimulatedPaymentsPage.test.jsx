@@ -52,6 +52,35 @@ describe("SimulatedPaymentsPage", () => {
     expect(document.body.textContent).not.toMatch(FORBIDDEN);
   });
 
+  it("lists ready requests first and explains a blocked invoice with a next step", async () => {
+    const BAD = "REQ-20261020-2";
+    const blocked = { ...ELIGIBLE, eligible: false, ticket_id: BAD, invoice_id: "INV-5002", invoice_match_status: "mismatch",
+      reasons: [{ code: "INVOICE_MATCH_FAILED", message: "The invoice did not match the purchase order and delivery." }] };
+    render({ routes: [
+      { method: "GET", path: "/api/admin/tickets", body: { tickets: [
+        { ticket_id: BAD, title: "Bad invoice", status: "approved", invoice_status: "mismatch" },
+        { ticket_id: TID, title: "Offsite lunch", status: "approved", invoice_status: "matched" },
+      ] } },
+      { method: "GET", path: `/api/admin/tickets/${BAD}`, body: { ticket_id: BAD, status: "approved", invoice_status: "mismatch",
+        invoice_match: { invoice_id: "INV-5002", status: "mismatch", post_approval: true, expected_total: 76125, invoiced_total: 78225, variance: 2100,
+          currency: "INR", checks: [{ name: "delivery_check", status: "fail", detail: "Lunch: billed 100 vs delivered 95" }, { name: "duplicate_check", status: "pass" }] } } },
+      { method: "GET", path: "/api/payments/simulation/eligibility/INV-5002", body: blocked },
+      { method: "GET", path: "/api/payments/simulation", body: { payments: [] } },
+    ] });
+    const select = await screen.findByLabelText(/Approved request/);
+    const opts = within(select).getAllByRole("option").slice(1).map((o) => o.textContent);
+    expect(opts[0]).toMatch(/Ready to simulate/);
+    expect(opts[1]).toMatch(/Invoice mismatch/);
+    await userEvent.selectOptions(select, BAD);
+    const help = await screen.findByTestId("blocked-help");
+    expect(help).toHaveTextContent("Lunch: billed 100 vs delivered 95");
+    expect(help).not.toHaveTextContent("Duplicate check");
+    expect(help).toHaveTextContent("Invoiced ₹78,225.00 vs draft PO ₹76,125.00");
+    expect(help).toHaveTextContent(/dispute the mismatch with the vendor/);
+    expect(within(help).getByRole("link", { name: "Open the request" })).toHaveAttribute("href", `/admin/requests/${BAD}`);
+    expect(screen.queryByRole("button", { name: "Create simulated payment instruction" })).toBeNull();
+  });
+
   it("confirms with the exact amount, creates the simulation and shows the receipt", async () => {
     const { fetchMock } = render({ routes: routes({ extra: [{ method: "POST", path: "/api/payments/simulation", status: 201,
       body: { payment: PAYMENT, replayed: false, mode: "SIMULATION", money_transferred: false, message: "Simulation accepted. No money was transferred." } }] }) });

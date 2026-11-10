@@ -2,7 +2,7 @@
 Approving is reserved for eligible approvers (/api/approvals)."""
 from __future__ import annotations
 
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Path, Query
 from pydantic import BaseModel, Field
@@ -49,6 +49,20 @@ def match_invoice(body: InvoiceMatchIn, ticket_id: str = Path(..., pattern=TICKE
                   admin: UserPublic = Depends(require_admin)) -> AdminTicketView:
     """Match an invoice that arrived after approval against the approved draft PO (no re-approval, no payment)."""
     return svc.to_admin_view(svc.match_invoice_after_approval(ticket_id, admin, body.invoice_id), admin)
+
+
+class InvoiceExceptionIn(BaseModel):
+    model_config = {"extra": "forbid"}
+    action: Literal["hold", "dispute", "vendor_response", "release", "reject"]
+    note: str = Field(min_length=5, max_length=1000)
+
+
+@router.post("/tickets/{ticket_id}/invoice-exception", response_model=AdminTicketView)
+def invoice_exception(body: InvoiceExceptionIn, ticket_id: str = Path(..., pattern=TICKET_ID_PATTERN),
+                      admin: UserPublic = Depends(require_admin)) -> AdminTicketView:
+    """Hold / dispute / record vendor response / release / reject the post-approval invoice.
+    Record-keeping only: nothing is sent to the vendor and nothing is paid."""
+    return svc.to_admin_view(svc.invoice_exception_action(ticket_id, admin, body.action, body.note), admin)
 
 
 @router.post("/tickets/{ticket_id}/decision", response_model=AdminTicketView)

@@ -9,4 +9,8 @@ venv/
 data/policy_store/
 .p3_acceptance_scratch/
 data/vendor_quote_store/
+data/invoice_doc_store/
 data/eval/reports/
+
+# local Mongo backups (scripts/backup_mongo.ps1)
+backups/

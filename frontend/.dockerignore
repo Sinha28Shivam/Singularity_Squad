@@ -1,0 +1,10 @@
+node_modules
+dist
+coverage
+.env
+.env.*
+!.env.example
+.vite
+npm-debug.log*
+Dockerfile
+.dockerignore

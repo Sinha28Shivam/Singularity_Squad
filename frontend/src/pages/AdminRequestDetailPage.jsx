@@ -10,13 +10,14 @@ import WorkflowResult, {
 } from "../components/WorkflowResult";
 import { NoteForm } from "./RequestDetailPage";
 import { useApi } from "../lib/useApi";
-import { formatDateTime } from "../lib/format";
+import { formatDateTime, humanize } from "../lib/format";
 import { api, ApiError } from "../api/client";
 import {
-  addAdminNote, APPROVAL_TICKET_STATUSES, getAdminAudit, getAdminTicket, getTicketApproval, listInvoices, matchInvoice,
+  addAdminNote, APPROVAL_TICKET_STATUSES, getAdminAudit, getAdminTicket, getTicketApproval, invoiceException, listInvoices, matchInvoice,
   NOT_RUNNABLE_STATUSES, previewInvoiceCheck, reconcileApproval, rejectAdminTicket, runAdminTicket, todayIso,
 } from "../api/requests";
 import WorkflowTimeline, { PendingActionBanner } from "../components/WorkflowTimeline";
+import DecisionExplanations from "../components/DecisionExplanations";
 import "../styles/pages/requests.css";
 
 const NOT_RUNNABLE_REASON = {
@@ -113,19 +114,115 @@ function RunPanel({ view, onDone }) {
   );
 }
 
-function InvoiceMatchPanel({ view, onDone }) {
+const EXCEPTION_ACTIONS = {
+  hold: { label: "Put on hold", title: "Put this invoice on hold?", tone: "primary",
+    description: "Simulated payment is blocked while the invoice is on hold. Nothing is sent to the vendor." },
+  dispute: { label: "Dispute with vendor", title: "Record a dispute?", tone: "danger",
+    description: "The failed checks are recorded with your reason. Nothing is sent to the vendor; contact them through your usual channel." },
+  vendor_response: { label: "Record vendor response", title: "Record the vendor's response?", tone: "primary",
+    description: "Note what the vendor said, for example that a corrected invoice will follow." },
+  release: { label: "Release hold", title: "Release the hold?", tone: "primary",
+    description: "The invoice becomes eligible again if it matched." },
+  reject: { label: "Reject invoice", title: "Reject this invoice?", tone: "danger",
+    description: "Payment stays blocked until a corrected invoice is matched." },
+};
+// Mirrors ticket_service._INVOICE_EXCEPTION_ACTIONS (the backend re-validates every transition).
+function allowedExceptionActions(state, matchStatus) {
+  if (!state) return matchStatus === "match" ? ["hold", "reject"] : ["hold", "dispute", "reject"];
+  if (state === "on_hold") return matchStatus === "match" ? ["release", "reject"] : ["dispute", "release", "reject"];
+  if (state === "disputed") return ["vendor_response", "reject"];
+  return [];
+}
+
+function InvoiceExceptionPanel({ view, onDone }) {
+  const [action, setAction] = useState(null);
+  const [rematch, setRematch] = useState(false);
+  const exc = view.invoice_exception;
+  const match = view.invoice_match;
+  const actions = allowedExceptionActions(exc?.state, match?.status);
+  const needsFix = match?.status !== "match" || exc?.state === "rejected" || exc?.state === "disputed";
+  const cfg = action ? EXCEPTION_ACTIONS[action] : null;
+  return (
+    <div className="stack-sm" data-testid="invoice-exception">
+      {exc && (
+        <Notice tone={exc.state === "rejected" ? "error" : "warning"} title={`Invoice ${humanizeState(exc.state)}`}>
+          {exc.reason && <div>Reason: {exc.reason}</div>}
+          {exc.vendor_response && <div>Vendor response: {exc.vendor_response}</div>}
+          <div className="small muted">Last updated by {exc.updated_by || "—"} · {formatDateTime(exc.updated_at)}</div>
+        </Notice>
+      )}
+      {needsFix && (
+        <p className="small">
+          <strong>Next step:</strong>{" "}
+          {exc?.state === "disputed" ? "When the vendor sends a corrected invoice, match it below."
+            : exc?.state === "rejected" ? "Match a corrected invoice to continue."
+              : "Dispute the mismatch with the vendor, or match a corrected invoice."}
+        </p>
+      )}
+      <div className="row">
+        {actions.map((a) => (
+          <button key={a} type="button" className={`btn btn-sm ${EXCEPTION_ACTIONS[a].tone === "danger" ? "btn-danger" : ""}`}
+            onClick={() => setAction(a)}>{EXCEPTION_ACTIONS[a].label}</button>
+        ))}
+        {needsFix && !rematch && (
+          <button type="button" className="btn btn-sm btn-primary" onClick={() => setRematch(true)}>Match corrected invoice</button>
+        )}
+      </div>
+      {rematch && (
+        <InvoiceMatchPanel view={view} exclude={match?.invoice_id}
+          intro="Pick the corrected invoice. It replaces the current match, which stays in the history. Nothing is paid."
+          onDone={async (u, m) => { setRematch(false); await onDone(u, m); }} />
+      )}
+      <ConfirmDialog open={Boolean(cfg)} title={cfg?.title || ""} description={cfg?.description}
+        confirmLabel={cfg?.label} tone={cfg?.tone} requireReason={5}
+        reasonLabel={action === "vendor_response" ? "Vendor response" : "Reason"}
+        onCancel={() => setAction(null)}
+        onConfirm={async (note) => {
+          const updated = await invoiceException(view.ticket_id, action, note);
+          const label = cfg.label;
+          setAction(null);
+          await onDone(updated, `${label}: recorded. No payment was made.`);
+        }} />
+    </div>
+  );
+}
+
+const humanizeState = (s) => ({ on_hold: "on hold", disputed: "disputed", rejected: "rejected" }[s] || s);
+
+function InvoiceHistory({ history }) {
+  const rows = Array.isArray(history) ? history.filter((h) => h && typeof h === "object") : [];
+  if (!rows.length) return null;
+  return (
+    <details className="disclosure">
+      <summary>Invoice history ({rows.length})</summary>
+      <ol className="stack-sm small" aria-label="Invoice history">
+        {rows.map((h, i) => (
+          <li key={`${h.at || h.superseded_at}-${i}`}>
+            <span className="mono">{h.invoice_id}</span>{" "}
+            {h.superseded_by
+              ? <>({humanize(h.status)}{h.exception_state ? `, ${humanizeState(h.exception_state)}` : ""}) replaced by <span className="mono">{h.superseded_by}</span> · {h.superseded_by_user} · {formatDateTime(h.superseded_at)}</>
+              : <>{EXCEPTION_ACTIONS[h.action]?.label || humanize(h.action)} by {h.by} · {formatDateTime(h.at)}{h.note ? ` — “${h.note}”` : ""}</>}
+          </li>
+        ))}
+      </ol>
+    </details>
+  );
+}
+
+function InvoiceMatchPanel({ view, onDone, exclude, intro }) {
   const invoices = useApi(() => listInvoices(), []);
   const [invoiceId, setInvoiceId] = useState("");
   const [open, setOpen] = useState(false);
+  const options = (invoices.data || []).filter((i) => i.invoice_id !== exclude);
   return (
     <div className="stack-sm">
-      <p className="small muted">An invoice arrived after approval? Compare it with the approved draft PO. This doesn't change the approval and nothing is paid.</p>
+      <p className="small muted">{intro || "An invoice arrived after approval? Compare it with the approved draft PO. This doesn't change the approval and nothing is paid."}</p>
       <div className="row">
         <div className="field">
           <label htmlFor="match-invoice">Invoice</label>
           <select id="match-invoice" className="select" value={invoiceId} onChange={(e) => setInvoiceId(e.target.value)} disabled={invoices.loading}>
             <option value="">Choose an invoice</option>
-            {(invoices.data || []).map((i) => <option key={i.invoice_id} value={i.invoice_id}>{i.invoice_id}{i.vendor_id ? ` · ${i.vendor_id}` : ""}</option>)}
+            {options.map((i) => <option key={i.invoice_id} value={i.invoice_id}>{i.invoice_id}{i.vendor_id ? ` · ${i.vendor_id}` : ""}</option>)}
           </select>
         </div>
       </div>
@@ -289,6 +386,13 @@ export default function AdminRequestDetailPage() {
         <WorkflowResult result={result} ticketId={tid} invoiceExtra={po ? <InvoicePreviewPanel po={po} /> : null} />
       </section>
 
+      {view.explanations?.length > 0 && (
+        <section className="card req-section" aria-labelledby="ad-why">
+          <h2 id="ad-why">Why these decisions?</h2>
+          <DecisionExplanations explanations={view.explanations} />
+        </section>
+      )}
+
       {showApproval && (
         <section className="card req-section" aria-labelledby="ad-approval">
           <h2 id="ad-approval">Approval</h2>
@@ -336,13 +440,18 @@ export default function AdminRequestDetailPage() {
 
       {(canMatchInvoice || view.invoice_match) && (
         <section className="card req-section" aria-labelledby="ad-invoice">
-          <h2 id="ad-invoice">Invoice after approval</h2>
+          <div className="row-between">
+            <h2 id="ad-invoice">Invoice after approval</h2>
+            {view.invoice_status && <StatusBadge kind="invoice" status={view.invoice_status} />}
+          </div>
           {view.invoice_match ? (
             <div className="stack-sm">
               <p className="small muted">Matched by {view.invoice_match.matched_by || "—"} · {formatDateTime(view.invoice_match.matched_at)}. No payment was made.</p>
               <ReconciliationDetails rec={view.invoice_match} />
+              <InvoiceExceptionPanel view={view} onDone={refreshAfter} />
             </div>
           ) : <InvoiceMatchPanel view={view} onDone={refreshAfter} />}
+          <InvoiceHistory history={view.invoice_history} />
         </section>
       )}
 

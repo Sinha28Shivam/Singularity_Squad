@@ -81,7 +81,11 @@ def mark_ticket_status(ticket_id: str, status: str, error: Optional[str] = None,
 
 _LIST_PROJECTION = {"_id": 0, "ticket_id": 1, "created_at": 1, "updated_at": 1, "status": 1,
                     "owner_username": 1, "owner_name": 1, "submission": 1, "run_count": 1,
-                    "workflow_result.final_status": 1}
+                    "workflow_result.final_status": 1,
+                    # payment readiness (admin list): only the fields invoice_status() reads
+                    "workflow_result.reconciliation.invoice_id": 1, "workflow_result.reconciliation.status": 1,
+                    "invoice_match.invoice_id": 1, "invoice_match.status": 1, "invoice_match.post_approval": 1,
+                    "invoice_exception.invoice_id": 1, "invoice_exception.state": 1}
 
 
 def create_submitted_ticket(ticket_id: str, *, owner_username: str, owner_name: str, owner_email: str,
@@ -179,8 +183,8 @@ def count_tickets_by_status(*, db: Optional[Database] = None) -> dict[str, int]:
 
 
 def _conditional_update(ticket_id: str, expected: Optional[set[str]], update: dict,
-                        db: Optional[Database]) -> bool:
-    query: dict[str, Any] = {"ticket_id": ticket_id}
+                        db: Optional[Database], extra: Optional[dict] = None) -> bool:
+    query: dict[str, Any] = {"ticket_id": ticket_id, **(extra or {})}
     if expected is not None:
         query["status"] = {"$in": sorted(expected)}
     try:
@@ -199,11 +203,41 @@ def set_status(ticket_id: str, status: str, *, expected: Optional[set[str]] = No
     return _conditional_update(ticket_id, expected, {"$set": fields}, db)
 
 
+_UNSET = object()
+
+
 def set_invoice_match(ticket_id: str, match: dict, *, expected: Optional[set[str]] = None,
+                      replaces: Any = _UNSET, push_history: Optional[list[dict]] = None,
                       db: Optional[Database] = None) -> bool:
-    """Store a post-approval invoice match (separate from the immutable workflow_result snapshot)."""
-    return _conditional_update(ticket_id, expected,
-                               {"$set": {"invoice_match": match, "updated_at": _now()}}, db)
+    """Store a post-approval invoice match (separate from the immutable workflow_result snapshot).
+
+    ``replaces`` (the current match's ``matched_at``, or None for "no match yet") makes the write a
+    compare-and-set, so two concurrent re-matches cannot silently overwrite each other. A new match clears any
+    open invoice exception; superseded records go to ``invoice_history``.
+    """
+    extra = None if replaces is _UNSET else (
+        {"invoice_match": None} if replaces is None else {"invoice_match.matched_at": replaces})
+    update: dict[str, Any] = {"$set": {"invoice_match": match, "invoice_exception": None, "updated_at": _now()}}
+    if push_history:
+        update["$push"] = {"invoice_history": {"$each": push_history}}
+    return _conditional_update(ticket_id, expected, update, db, extra)
+
+
+def set_invoice_exception(ticket_id: str, exception: Optional[dict], *, previous: Optional[dict],
+                          push_history: Optional[dict] = None, db: Optional[Database] = None) -> bool:
+    """Compare-and-set the ticket's invoice exception (hold/dispute/reject) on an approved ticket.
+
+    ``previous`` is the exception record the caller read (None if there was none); the write only applies if it
+    is still current, so concurrent admins cannot overwrite each other's decision.
+    """
+    extra: dict[str, Any] = ({"invoice_exception": None} if previous is None else
+                             {"invoice_exception.invoice_id": previous.get("invoice_id"),
+                              "invoice_exception.state": previous.get("state"),
+                              "invoice_exception.updated_at": previous.get("updated_at")})
+    update: dict[str, Any] = {"$set": {"invoice_exception": exception, "updated_at": _now()}}
+    if push_history is not None:
+        update["$push"] = {"invoice_history": push_history}
+    return _conditional_update(ticket_id, {"approved"}, update, db, extra)
 
 
 def push_note(ticket_id: str, note: dict, *, db: Optional[Database] = None) -> bool:

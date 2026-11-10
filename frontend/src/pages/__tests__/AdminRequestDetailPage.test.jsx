@@ -153,6 +153,64 @@ describe("AdminRequestDetailPage", () => {
     expect(callsTo(fetchMock, `${BASE}/invoice-match`, "POST")[0].json).toEqual({ invoice_id: "INV-5001" });
   });
 
+  it("disputes a mismatched invoice, then matches the corrected one", async () => {
+    const MISMATCH = { invoice_id: "INV-5002", status: "mismatch", post_approval: true, expected_total: 68250, invoiced_total: 70350,
+      variance: 2100, matched_by: "admin", matched_at: "2026-10-21T12:00:00", recommendation: "Hold payment.",
+      checks: [{ name: "line_item:Lunch", status: "fail", detail: "unit price 720 vs PO 700" }] };
+    const { fetchMock } = setup(view({ status: "approved", run_count: 1, workflow_result: RESULT, invoice_match: MISMATCH, invoice_status: "mismatch" }), {
+      [`POST ${BASE}/invoice-exception`]: (s, init) => {
+        const { action, note } = JSON.parse(init.body);
+        s.view = { ...s.view, invoice_status: "disputed", invoice_exception: { invoice_id: "INV-5002", state: "disputed", reason: note, updated_by: "admin" },
+          invoice_history: [{ action, by: "admin", at: "2026-10-21T12:05:00", note, invoice_id: "INV-5002" }] };
+        return { body: s.view };
+      },
+      [`POST ${BASE}/invoice-match`]: (s) => {
+        s.view = { ...s.view, invoice_status: "matched", invoice_exception: null,
+          invoice_match: { ...MISMATCH, invoice_id: "INV-5001", status: "match", invoiced_total: 68250, variance: 0, checks: [] },
+          invoice_history: [...s.view.invoice_history, { invoice_id: "INV-5002", status: "mismatch", superseded_by: "INV-5001", superseded_by_user: "admin", superseded_at: "2026-10-21T12:10:00" }] };
+        return { body: s.view };
+      },
+    });
+    expect(await screen.findByText("Invoice mismatch")).toBeInTheDocument();
+    expect(screen.getByText(/Dispute the mismatch with the vendor/)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: "Dispute with vendor" }));
+    const dialog = screen.getByRole("dialog");
+    expect(dialog).toHaveTextContent("Nothing is sent to the vendor");
+    await userEvent.type(within(dialog).getByLabelText(/Reason/), "Rate 720 vs 700");
+    await userEvent.click(within(dialog).getByRole("button", { name: "Dispute with vendor" }));
+    expect(await screen.findByText("Dispute with vendor: recorded. No payment was made.")).toBeInTheDocument();
+    expect(document.querySelector('[data-status="disputed"]')).toHaveTextContent("Invoice disputed");
+    expect(screen.getByTestId("invoice-exception")).toHaveTextContent("Reason: Rate 720 vs 700");
+    expect(callsTo(fetchMock, `${BASE}/invoice-exception`, "POST")[0].json).toEqual({ action: "dispute", note: "Rate 720 vs 700" });
+    // Disputed: only "record vendor response" and "reject" remain, plus re-matching.
+    expect(screen.queryByRole("button", { name: "Dispute with vendor" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Record vendor response" })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Match corrected invoice" }));
+    const select = screen.getByLabelText("Invoice");
+    expect(within(select).queryByRole("option", { name: /INV-5002/ })).toBeNull();   // current invoice excluded
+    await userEvent.selectOptions(select, "INV-5001");
+    await userEvent.click(screen.getByRole("button", { name: "Match invoice" }));
+    await userEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Match invoice" }));
+    expect(await screen.findByText("Ready to simulate")).toBeInTheDocument();
+    expect(screen.getByText("Invoice history (2)")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(FORBIDDEN);
+  });
+
+  it("shows server explanations for each decision with evidence", async () => {
+    setup(view({ status: "reviewed", run_count: 1, workflow_result: RESULT, explanations: [
+      { topic: "invoice", title: "Invoice check", outcome: "fail", summary: "Invoice INV-5002: mismatch.",
+        factors: [{ label: "Delivery check", status: "fail", detail: "billed 100 vs delivered 95", evidence: ["policy:FIN-5.2"] }],
+        limitations: ["3-way match."] },
+      { topic: "policy", title: "Policy check", outcome: "not_run", summary: "The policy check didn't run.", factors: [], limitations: [] },
+    ] }));
+    const panel = await screen.findByTestId("explanations");
+    expect(within(panel).getByText("Why? Invoice check")).toBeInTheDocument();
+    expect(panel).toHaveTextContent("billed 100 vs delivered 95");
+    expect(panel).toHaveTextContent("policy:FIN-5.2");
+    expect(within(panel).getByText("Not run")).toBeInTheDocument();
+  });
+
   it("does not offer invoice matching when the run already reconciled an invoice", async () => {
     setup(view({ status: "approved", run_count: 1, workflow_result: { ...RESULT, reconciliation: { invoice_id: "INV-5001", status: "match", checks: [] } } }));
     await screen.findByTestId("ticket-id");

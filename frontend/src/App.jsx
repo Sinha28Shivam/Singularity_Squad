@@ -20,6 +20,9 @@ const RfqDetailPage = lazy(() => import("./pages/RfqDetailPage"));
 const PolicyLibraryPage = lazy(() => import("./pages/PolicyLibraryPage"));
 const PolicyRulesPage = lazy(() => import("./pages/PolicyRulesPage"));
 const SimulatedPaymentsPage = lazy(() => import("./pages/SimulatedPaymentsPage"));
+const AnalyticsPage = lazy(() => import("./pages/AnalyticsPage"));
+const InboxPage = lazy(() => import("./pages/InboxPage"));
+const InvoiceIntakePage = lazy(() => import("./pages/InvoiceIntakePage"));
 const NotFoundPage = lazy(() => import("./pages/NotFoundPage"));
 
 /** Route guard for UX only: the backend still authorizes every API call. */
@@ -50,6 +53,7 @@ export default function App() {
         <Route element={<AppLayout />}>
           <Route path="/" element={<Navigate to={homeFor(user.role)} replace />} />
           {/* Requester */}
+          <Route path="/inbox" element={g(null, <InboxPage />)} />
           <Route path="/requests" element={g(["user"], <MyRequestsPage />)} />
           <Route path="/requests/new" element={g(["user"], <NewRequestPage />)} />
           <Route path="/requests/:ticketId" element={g(["user"], <RequestDetailPage />)} />
@@ -65,11 +69,14 @@ export default function App() {
           <Route path="/admin/approvals" element={g(["admin"], <ApprovalsPage mode="pending" readOnly />)} />
           <Route path="/admin/approvals/:approvalId" element={g(["admin"], <ApprovalDetailPage readOnly />)} />
           <Route path="/admin/payments" element={g(["admin"], <SimulatedPaymentsPage />)} />
+          <Route path="/admin/analytics" element={g(["admin"], <AnalyticsPage />)} />
+          <Route path="/admin/invoices" element={g(["admin"], <InvoiceIntakePage />)} />
           {/* Approver */}
           <Route path="/approvals" element={g(["approver"], <ApprovalsPage mode="pending" />)} />
           <Route path="/approvals/history" element={g(["approver"], <ApprovalsPage mode="history" />)} />
           <Route path="/approvals/:approvalId" element={g(["approver"], <ApprovalDetailPage />)} />
           <Route path="/policy-review" element={g(["approver"], <PolicyRulesPage reviewer />)} />
+          <Route path="/analytics" element={g(["approver"], <AnalyticsPage />)} />
           <Route path="*" element={<NotFoundPage />} />
         </Route>
       </Routes>

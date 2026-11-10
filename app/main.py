@@ -21,14 +21,18 @@ from app.auth.errors import AuthError
 from app.approvals.errors import ApprovalError
 from app.auth.service import seed_admin_from_env, seed_approvers_from_env
 from app.data_loader import load_json
+from app.middleware import RequestIDMiddleware
 from app.orchestrator import AnalysisBranchError
 from app.db import PersistenceError, close_client, ensure_indexes, persistence_mode, ping_database
 from app.db.mongo import db_status
 from app.repositories import get_audit_entries, get_ticket, list_recent_tickets
 from app.routers import admin_tickets as admin_tickets_router
+from app.routers import analytics as analytics_router
 from app.routers import ai_ops as ai_ops_router
 from app.routers import approvals as approvals_router
 from app.routers import auth as auth_router
+from app.routers import inbox as inbox_router
+from app.routers import invoice_intake as invoice_intake_router
 from app.routers import my_tickets as my_tickets_router
 from app.routers import payments as payments_router
 from app.routers import vendor_candidates as vendor_candidates_router
@@ -121,6 +125,7 @@ app.add_middleware(CORSMiddleware, allow_origins=_cors_origins(), allow_credenti
                    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
                    allow_headers=["Authorization", "Content-Type", "X-Correlation-ID"],
                    expose_headers=["Content-Disposition"])
+app.add_middleware(RequestIDMiddleware)  # outermost: every response (incl. CORS preflight/errors) gets X-Request-ID
 
 
 @app.exception_handler(PersistenceError)
@@ -195,6 +200,9 @@ async def _validation_error_handler(request: Request, exc: RequestValidationErro
 app.include_router(payments_router.router)
 app.include_router(vendor_candidates_router.router)
 app.include_router(vendor_sourcing_router.router)
+app.include_router(analytics_router.router)
+app.include_router(inbox_router.router)
+app.include_router(invoice_intake_router.router)
 _ADMIN_ONLY = [Depends(require_admin)]
 
 
@@ -235,8 +243,10 @@ def samples():
 
 @app.get("/api/invoices")
 def invoices():
+    demo_ids = {i.invoice_id for i in billing.load_demo_invoices()}
     return [{"invoice_id": i.invoice_id, "vendor_id": i.vendor_id, "po_id": i.po_id,
-             "total": i.total, "delivery_id": i.delivery_id} for i in billing.load_invoices()]
+             "total": i.total, "delivery_id": i.delivery_id,
+             "source": "demo" if i.invoice_id in demo_ids else "uploaded"} for i in billing.load_invoices()]
 
 
 @app.post("/api/workflow", response_model=WorkflowResult, dependencies=_ADMIN_ONLY)

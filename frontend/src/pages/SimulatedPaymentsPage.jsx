@@ -10,13 +10,36 @@ import { useHealth } from "../lib/health";
 import { formatDateTime, formatMoney, humanize } from "../lib/format";
 import {
   createSimulation, getEligibility, getPayment, listApprovedTickets, listPayments, paymentError, paymentEvents,
-  retryPayment, ticketInvoice,
+  retryPayment, ticketInvoiceDetails,
 } from "../api/payments";
 import "../styles/pages/payments.css";
 
 const BANNER = "Simulation only — no money is transferred.";
 const REPLAY_NOTICE = "Existing simulated payment returned";
 const RETRYABLE = new Set(["failed_simulated"]);
+
+const READINESS_ORDER = ["matched", "on_hold", "disputed", "mismatch", "rejected", "duplicate", "needs_invoice"];
+function sortByReadiness(rows) {
+  const rank = (s) => { const i = READINESS_ORDER.indexOf(s); return i < 0 ? READINESS_ORDER.length : i; };
+  return [...rows].sort((a, b) => rank(a.invoice_status) - rank(b.invoice_status));
+}
+
+// Plain-language next step per blocking reason code (the backend is still the gate).
+const NEXT_STEP = {
+  INVOICE_MATCH_FAILED: "Open the request, dispute the mismatch with the vendor, then match the corrected invoice.",
+  INVOICE_DISPUTED: "Waiting on the vendor. Match the corrected invoice on the request page when it arrives.",
+  INVOICE_ON_HOLD: "Release the hold on the request page when the issue is resolved.",
+  INVOICE_REJECTED: "Match a corrected invoice on the request page.",
+  DUPLICATE_INVOICE: "This invoice was already paid. Reject it and ask the vendor for the correct invoice.",
+  RECONCILIATION_REQUIRED: "Match the vendor invoice against the approved draft PO on the request page.",
+  APPROVAL_STALE: "The request changed after approval. Re-run it and get a new approval.",
+  APPROVAL_MISSING: "An eligible approver must approve the request first.",
+  POLICY_BLOCK: "A policy check blocks this request. Review the policy evidence on the request page.",
+};
+
+function failedChecks(rec) {
+  return (Array.isArray(rec?.checks) ? rec.checks : []).filter((c) => c && (c.status === "fail" || c.status === "warn"));
+}
 
 function confirmationText(amount, currency) {
   return `You are about to create a simulated payment instruction for ${formatMoney(amount, currency || "INR")} (${currency || "INR"}). ` +
@@ -56,8 +79,13 @@ function PaymentsWorkspace() {
                 <label htmlFor="pay-ticket" className="required">Approved request</label>
                 <select id="pay-ticket" className="select" value={ticketId} onChange={(e) => setTicketId(e.target.value)}>
                   <option value="">Select an approved request</option>
-                  {tickets.data.map((t) => <option key={t.ticket_id} value={t.ticket_id}>{t.ticket_id}{t.title ? ` · ${t.title}` : ""}</option>)}
+                  {sortByReadiness(tickets.data).map((t) => (
+                    <option key={t.ticket_id} value={t.ticket_id}>
+                      {t.ticket_id}{t.title ? ` · ${t.title}` : ""}{t.invoice_status ? ` — ${statusLabel(t.invoice_status, "invoice")}` : ""}
+                    </option>
+                  ))}
                 </select>
+                <span className="help">Requests that are ready to simulate are listed first.</span>
               </div>
             )}
       </section>
@@ -106,15 +134,16 @@ function ReasonCodes({ err }) {
 }
 
 function TicketPayment({ ticketId, onCreated }) {
-  const invoice = useApi(() => ticketInvoice(ticketId), [ticketId]);
-  const invoiceId = invoice.data;
+  const invoice = useApi(() => ticketInvoiceDetails(ticketId), [ticketId]);
+  const details = invoice.data;
+  const invoiceId = details?.invoiceId || null;
   const elig = useApi(() => (invoiceId ? getEligibility(ticketId, invoiceId) : Promise.resolve(null)), [ticketId, invoiceId]);
   const [confirming, setConfirming] = useState(false);
   const [createError, setCreateError] = useState(null);
   const [receipt, setReceipt] = useState(null);
   const cancelConfirm = useCallback(() => setConfirming(false), []);
 
-  if (invoice.loading && invoice.data === null && !invoice.error) return <section className="card"><LoadingState label="Loading invoice…" /></section>;
+  if (invoice.loading && !invoice.data && !invoice.error) return <section className="card"><LoadingState label="Loading invoice…" /></section>;
   if (invoice.error) return <section className="card"><ErrorBlock err={paymentError(invoice.error)} onRetry={invoice.reload} /></section>;
   if (!invoiceId) {
     return (
@@ -163,6 +192,7 @@ function TicketPayment({ ticketId, onCreated }) {
                   </div>
                 </div>
               )}
+              {!e.eligible && <BlockedHelp ticketId={ticketId} reasons={reasons} details={details} />}
               <div className="row">
                 {e.eligible && (
                   <button type="button" className="btn btn-primary" onClick={() => { setCreateError(null); setConfirming(true); }}>
@@ -203,6 +233,38 @@ function TicketPayment({ ticketId, onCreated }) {
         <ReasonCodes err={confirming ? createError : null} />
       </ConfirmDialog>
     </>
+  );
+}
+
+function BlockedHelp({ ticketId, reasons, details }) {
+  const rec = details?.reconciliation;
+  const checks = failedChecks(rec);
+  const steps = [...new Set(reasons.map((r) => NEXT_STEP[r.code]).filter(Boolean))];
+  if (!checks.length && !steps.length) return null;
+  return (
+    <div className="card-quiet stack-sm" data-testid="blocked-help">
+      {checks.length > 0 && (
+        <div className="stack-sm">
+          <strong className="small">What didn't match{rec?.invoice_id ? ` (${rec.invoice_id})` : ""}</strong>
+          {rec && rec.invoiced_total != null && (rec.expected_total ?? rec.po_total) != null && (
+            <p className="small">
+              Invoiced {formatMoney(rec.invoiced_total, rec.currency || "INR")} vs draft PO {formatMoney(rec.expected_total ?? rec.po_total, rec.currency || "INR")}
+              {rec.variance ? ` (difference ${formatMoney(rec.variance, rec.currency || "INR")})` : ""}.
+            </p>
+          )}
+          <ul className="small" aria-label="Failed invoice checks">
+            {checks.map((c, i) => <li key={`${c.name}-${i}`}><strong>{humanize(c.name)}:</strong> {c.detail}</li>)}
+          </ul>
+        </div>
+      )}
+      {steps.length > 0 && (
+        <div className="stack-sm">
+          <strong className="small">Next step</strong>
+          <ul className="small">{steps.map((s) => <li key={s}>{s}</li>)}</ul>
+          <div><Link className="btn btn-sm" to={`/admin/requests/${encodeURIComponent(ticketId)}`}>Open the request</Link></div>
+        </div>
+      )}
+    </div>
   );
 }
 

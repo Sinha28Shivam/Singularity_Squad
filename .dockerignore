@@ -1,0 +1,23 @@
+# Keep the API image small and secret-free.
+.git
+.github
+.vscode
+.venv
+venv
+**/__pycache__
+**/*.pyc
+.pytest_cache
+.p3_acceptance_scratch
+.env
+.env.*
+!.env.example
+data/policy_store
+data/vendor_quote_store
+data/eval/reports
+backups
+frontend
+node_modules
+tests
+Docs
+experiments
+*.pptx

@@ -16,11 +16,22 @@ export async function listApprovedTickets() {
 
 /** Invoice id from the ticket's stored reconciliation (or a post-approval invoice match). */
 export async function ticketInvoice(ticketId) {
+  return (await ticketInvoiceDetails(ticketId)).invoiceId;
+}
+
+/** The governing reconciliation for payment (run reconciliation wins; else the post-approval match). */
+export async function ticketInvoiceDetails(ticketId) {
   const view = await api.get(`/api/admin/tickets/${enc(ticketId)}`);
   const recon = view?.workflow_result?.reconciliation;
-  const fromRecon = recon && typeof recon === "object" ? recon.invoice_id : null;
-  const fromMatch = view?.invoice_match && typeof view.invoice_match === "object" ? view.invoice_match.invoice_id : null;
-  return fromRecon || fromMatch || null;
+  const match = view?.invoice_match;
+  const rec = recon && typeof recon === "object" ? recon : match && typeof match === "object" ? match : null;
+  return {
+    invoiceId: rec?.invoice_id || null,
+    reconciliation: rec,
+    postApproval: Boolean(rec && rec === match),
+    exception: view?.invoice_exception || null,
+    status: view?.invoice_status || null,
+  };
 }
 
 export const getEligibility = (ticketId, invoiceId) =>
